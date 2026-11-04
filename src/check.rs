@@ -368,6 +368,7 @@ pub struct Last {
     pub errors: Vec<(String, String)>,        // (who, message) from the mods' own logs
     pub crash: Option<(String, String)>,      // (what Advanced Crash Reporter concluded, its report)
     pub memory: Option<String>,               // memory was nearly full when the game crashed or closed
+    pub lead: Option<String>,                 // the mods named after a character the crash report names, such as a redesign
 }
 
 fn older(r: &str, exe: &str) -> &'static str { if cmp_ver(r, exe).is_lt() { "an older" } else { "a newer" } }
@@ -448,7 +449,7 @@ fn gone(roots: &[&Path], folder: &str, at: SystemTime) -> bool {
 
 /// RED4ext's newest log (and redscript's, the mod logs and the crash report from the same launch), if that launch ran `exe`.
 /// `framework` tells a framework's mod entry, which a log can't make a leftover.
-fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> Option<Last> {
+fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, entries: &[Vec<String>]) -> Option<Last> {
     let logs: Vec<PathBuf> = roots.iter().filter_map(|r| resolve(r, "red4ext/logs")).flat_map(|d| files(&d)).collect();
     let (log, stamp) = logs.iter().filter_map(|p| log_name(&name(p)).filter(|(w, _)| w.eq_ignore_ascii_case("red4ext")).map(|(_, d)| (p, d)))
         .max_by(|a, b| a.1.cmp(&b.1))?;
@@ -603,6 +604,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> 
             // a crash when memory ran out isn't a mod's fault, whatever the verdict says
             last.crash = Some((if oom { format!("Your last launch {did} because the game ran out of memory{nums}: {FREE}. Advanced Crash Reporter's verdict ({v}) likely doesn't apply.") }
                                else { format!("Your last launch {did}. Advanced Crash Reporter's verdict: {v}.{also}") }, rel));
+            if !oom { last.lead = named_after(&t, roots, entries, framework) }
         }
         break;
     }
@@ -621,6 +623,34 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> 
         last.memory = Some(format!("Memory was nearly full {at} ({c} committed, {g} of it by the game), and running out can crash the game or cut its sound: {FREE}."));
     }
     Some(last)
+}
+
+/// The mods named after a character Advanced Crash Reporter names among the objects the crash was handling ("objects: animRig,
+/// NPCPuppet misty.ent"): a mod that changes the character, such as a redesign, is the likeliest cause. Mods in other mods' folders aren't searched.
+fn named_after(report: &str, roots: &[&Path], entries: &[Vec<String>], framework: &dyn Fn(&str) -> bool) -> Option<String> {
+    let objs = field(report, "Technical")?.split("objects: ").nth(1)?.split(';').next()?;
+    let who: Vec<String> = objs.split(", ").filter_map(|o| o.rsplit(' ').next()?.strip_suffix(".ent"))     // not passers-by: "citizen__ep1_tenant_ma.ent"
+        .filter(|s| s.len() > 2 && s.bytes().all(|b| b.is_ascii_alphabetic())).map(str::to_lowercase).collect();
+    let (mut whom, mut v) = (vec![], vec![]);
+    for (r, u) in entries.iter().enumerate().flat_map(|(r, l)| l.iter().map(move |u| (r, u))).filter(|(_, u)| !framework(u)) {
+        let f = u.rsplit('/').next().unwrap_or(u);
+        let Some(w) = who.iter().find(|w| after(f, w)) else { continue };
+        if !whom.contains(w) { whom.push(w.clone()) }
+        v.push(if r == roots.len() - 1 { f.to_string() } else { format!("{f} (in {})", name(roots[r])) });
+    }
+    if v.is_empty() { return None }
+    v.sort_by_key(|f| f.to_lowercase());
+    if v.len() > 6 { let n = v.len() - 5; v.truncate(5); v.push(format!("{n} more")) }
+    let ents: Vec<String> = whom.iter().map(|w| format!("{w}.ent")).collect();
+    let names: Vec<String> = whom.iter().map(|w| w[..1].to_uppercase() + &w[1..]).collect();
+    Some(format!("The crash report names {}, so try without the mods named after {} first: {}.", list(&ents), list(&names), list(&v)))
+}
+
+/// Is a file named after `who` ("misty"), as a word of its name? "!!00_Misty_Goth_Redesign.archive", "TheMistyMod", not "Mistyfied".
+fn after(file: &str, who: &str) -> bool {
+    let b = file.as_bytes();
+    file.to_ascii_lowercase().match_indices(who).any(|(i, _)| (i == 0 || !b[i - 1].is_ascii_alphabetic() || b[i - 1].is_ascii_lowercase() && b[i].is_ascii_uppercase())
+        && !b.get(i + who.len()).is_some_and(u8::is_ascii_lowercase))
 }
 
 /// What to do when memory runs out: need less of it, or let the system commit more.
@@ -737,7 +767,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         .filter(|rel| unit(rel).as_deref() == Some(rel.as_str())).collect()).collect();
     let protect: Vec<String> = m.framework.iter().flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
     let framework = |u: &str| protect.iter().any(|p| wild(p, u));
-    let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e, &framework));
+    let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e, &framework, &entries));
     let dir = |u: &str| u.rsplit_once('/').map_or(String::new(), |x| x.0.to_lowercase());
     let matching = |own: &[String], kin: Kin| {                     // (root, entry, own?), its own first
         let keys: Vec<(String, String)> = own.iter().map(|u| (key(u), dir(u))).filter(|k| !k.0.is_empty()).collect();
@@ -881,6 +911,7 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
         s += &format!("Last launch: {}\n", l.when);
         if let Some((c, p)) = &l.crash { s += &format!("! {c} ({p})\n") }
         if let Some(m) = &l.memory { s += &format!("! {m}\n") }
+        if let Some(m) = &l.lead { s += &format!("! {m}\n") }
         for (w, m) in &l.errors { s += &format!("\terror: {w}: {m}\n") }
     }
     for x in &r.rows {
@@ -1231,6 +1262,31 @@ mod tests {
         report("watch/watch-07.txt", "12:11:46", "52.5 GB of 53.7 GB", "22.4 GB", true);
         assert_eq!(last().1.unwrap(), format!("Memory was nearly full just before the game closed (52.5 GB of 53.7 GB committed, 22.4 GB of it by the game), \
                                                and running out can crash the game or cut its sound: {FREE}."));
+    }
+
+    #[test]
+    fn named_after_the_character() {
+        for (f, yes) in [("!!00_Misty_Goth_Redesign.archive", true), ("misty_explicit.xl", true), ("TheMistyMod", true), ("MISTY.archive", true), ("Mistyfied.archive", false), ("Hmisty.reds", false)] {
+            assert_eq!(after(f, "misty"), yes, "{f}");
+        }
+        let root = install("misty", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("archive/pc/mod/!!00_Misty_Goth_Redesign.archive", None),
+                                                   ("archive/pc/mod/misty_explicit.xl", None), ("archive/pc/mod/Mistyfied.archive", None),
+                                                   ("archive/pc/mod/Citizen Variety.archive", None), ("r6/scripts/Allies/Characters/MistyModule.reds", None)]);
+        let m = install("misty-MO2 Misty Hair", [0; 4], &[("archive/pc/mod/MistyHair.archive", None)]);
+        fs::create_dir_all(root.join("red4ext/logs")).unwrap();
+        fs::write(root.join("red4ext/logs/red4ext-2026-11-04-12-20-11.log"), "[RED4ext] File version: 3.0.88.46235\n").unwrap();
+        let reports = root.join("bin/x64/plugins/AdvancedCrashReporter/reports");
+        fs::create_dir_all(&reports).unwrap();
+        let lead = |objs: &str| {
+            fs::write(reports.join("20261104-123248-crash-tid1-01.txt"), format!("Game version   : 2.5 (3.0.88.46235, built 2026-10-19)\n\
+                Verdict        : Possible culprit: mods not yet updated for game 2.5\nTechnical      : redDispatcher4 faulted in Cyberpunk2077.exe [GAME-EXE]; \
+                no mod code executing; objects: {objs}; REDscope-internal logged a warning 0.021s before\n")).unwrap();
+            scan(&Manifest::parse(LIST).unwrap(), &root, std::slice::from_ref(&m), &NO_ENV).unwrap().last.unwrap().lead
+        };
+        assert_eq!(lead("animRig, NPCPuppet misty.ent, NPCPuppet citizen__ep1_tenant_ma.ent, worldAnimationSystem").unwrap(), format!(
+            "The crash report names misty.ent, so try without the mods named after Misty first: !!00_Misty_Goth_Redesign.archive, misty_explicit.xl \
+             and MistyHair.archive (in {}).", m.file_name().unwrap().to_string_lossy()), "not one in another mod's folder");
+        assert!(lead("animRig, NPCPuppet citizen__ep1_tenant_ma.ent").is_none(), "a passer-by");
     }
 
     #[test]

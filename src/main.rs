@@ -107,7 +107,7 @@ impl App {
         let mut ask: Option<Vec<&check::Row>> = None;          // rows whose Remove… was pressed
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if let Some(l) = &r.last {
-                let n = l.errors.len() + usize::from(l.crash.is_some()) + usize::from(l.memory.is_some());
+                let n = l.errors.len() + [l.crash.is_some(), l.memory.is_some(), l.lead.is_some()].into_iter().filter(|&x| x).count();
                 let mut what = vec![];
                 if l.crash.is_some() { what.push("it crashed".to_string()) } else if l.memory.is_some() { what.push("memory ran nearly full".into()) }
                 if !l.errors.is_empty() || what.is_empty() { what.push(format!("mods logged {}", count(l.errors.len(), "error"))) }
@@ -117,7 +117,7 @@ impl App {
                     if let Some((c, report)) = &l.crash {
                         ui.horizontal(|ui| { dot(ui, Color32::RED, report); ui.add(egui::Label::new(RichText::new(c).strong()).truncate().show_tooltip_when_elided(false)).on_hover_text(format!("{c}\n\nReport: {report}")) });
                     }
-                    if let Some(m) = &l.memory { ui.horizontal(|ui| { dot(ui, Color32::RED, ""); ui.add(egui::Label::new(RichText::new(m).strong()).truncate()) }); }
+                    for m in [&l.lead, &l.memory].into_iter().flatten() { ui.horizontal(|ui| { dot(ui, Color32::RED, ""); ui.add(egui::Label::new(RichText::new(m).strong()).truncate()) }); }
                     for (who, msg) in &l.errors {
                         ui.horizontal(|ui| {
                             dot(ui, Color32::RED, "");
