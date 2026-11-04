@@ -1,7 +1,7 @@
 //! The compatibility manifest, the install scan and the verdicts.
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use serde::Deserialize;
-use std::{cmp::Ordering, collections::BTreeMap, fs, io::Read, path::{Path, PathBuf}, time::SystemTime};
+use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::Read, path::{Path, PathBuf}, time::SystemTime};
 
 pub const BUILT_IN: &str = include_str!("../compat.toml");
 
@@ -185,6 +185,121 @@ fn key(unit: &str) -> String { unit.rsplit('/').next().unwrap_or("").split('.').
 
 fn files(dir: &Path) -> impl Iterator<Item = PathBuf> + use<> { fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) }
 fn name(p: &Path) -> String { p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()) }
+
+/// A redscript file, for finding the add-ons that build on a mod: its root and **Mod entry**, the module it declares,
+/// the modules it has to import (not those under `@if(ModuleExists(..))`), the classes and functions it defines, and
+/// every name its code uses.
+struct Script { root: usize, unit: String, module: Option<String>, imports: Vec<String>, defs: Vec<String>, names: HashSet<String> }
+
+/// A .reds file's (module, imports, defs, names). Comments and strings are blanked first, so an `import` or a name
+/// inside them doesn't count.
+fn reds(t: &str) -> (Option<String>, Vec<String>, Vec<String>, HashSet<String>) {
+    let (mut code, mut it) = (String::with_capacity(t.len()), t.trim_start_matches('\u{feff}').chars().peekable());
+    while let Some(c) = it.next() {
+        match (c, it.peek()) {
+            ('/', Some('/')) => { it.by_ref().find(|&c| c == '\n'); code.push('\n') }
+            ('/', Some('*')) => {
+                let mut star = false;
+                it.next();
+                for c in it.by_ref() {
+                    if c == '\n' { code.push('\n') }
+                    if star && c == '/' { break }
+                    star = c == '*';
+                }
+            }
+            ('"', _) => {
+                let mut esc = false;
+                for c in it.by_ref() {
+                    if c == '\n' { code.push('\n'); break }
+                    if c == '"' && !esc { break }
+                    esc = c == '\\' && !esc;
+                }
+                code.push(' ');
+            }
+            _ => code.push(c),
+        }
+    }
+    let path = |s: &str| s.trim_start().split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("").trim_end_matches('.').to_string();
+    let (mut module, mut imports, mut guarded) = (None, vec![], false);
+    for l in code.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let after = |w: &str| l.strip_prefix(w).filter(|r| r.starts_with(char::is_whitespace)).map(path);
+        if module.is_none() { module = after("module") }
+        if !guarded && let Some(p) = after("import") { imports.push(p) }
+        guarded = l.starts_with("@if(") && !l.contains("import");      // an optional import: compiles without the module
+    }
+    let (b, mut toks, mut i) = (code.as_bytes(), vec![], 0);
+    while i < b.len() {
+        let s = i;
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1 }
+            toks.push(&code[s..i]);
+        } else { if b"{}@".contains(&b[i]) { toks.push(&code[i..=i]) } i += 1 }
+    }
+    let word = |t: &str| !b"{}@".contains(&t.as_bytes()[0]);
+    let (mut defs, mut depth, mut method) = (vec![], 0usize, false);   // method: the next func wraps, replaces or adds a method
+    for (k, t) in toks.iter().enumerate() {
+        let next = toks.get(k + 1).filter(|n| word(n)).map(|n| n.to_string());
+        match *t {
+            "{" => depth += 1,
+            "}" => depth = depth.saturating_sub(1),
+            "@" => method |= next.is_some_and(|a| ["Method", "Global", "Constructor"].into_iter().any(|s| a.ends_with(s))),
+            "class" | "struct" | "enum" => defs.extend(next),
+            "func" => { if depth == 0 && !method { defs.extend(next) } method = false }
+            _ => {}
+        }
+    }
+    (module, imports, defs, toks.into_iter().filter(|t| word(t)).map(str::to_string).collect())
+}
+
+/// Every redscript file in each root: in r6/scripts, and in RED4ext plugin folders, which hold scripts too (Codeware's).
+fn scripts(roots: &[&Path]) -> Vec<Script> {
+    fn walk(d: &Path, depth: u8, f: &mut dyn FnMut(PathBuf)) {
+        for e in fs::read_dir(d).into_iter().flatten().flatten() {
+            match e.file_type() { Ok(t) if t.is_dir() && depth < 8 => walk(&e.path(), depth + 1, f), Ok(t) if t.is_file() => f(e.path()), _ => {} }
+        }
+    }
+    let mut v = vec![];
+    for (root, r) in roots.iter().enumerate() {
+        for d in ["r6/scripts", "red4ext/plugins"].into_iter().filter_map(|d| resolve(r, d)) {
+            walk(&d, 0, &mut |p: PathBuf| {
+                if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("reds")) { return }
+                let Some(entry) = p.strip_prefix(r).ok().and_then(|x| unit(&x.to_string_lossy())) else { return };
+                let (module, imports, defs, names) = reds(&String::from_utf8_lossy(&read(&p, 8 << 20).unwrap_or_default()));
+                v.push(Script { root, unit: entry, module, imports, defs, names });
+            });
+        }
+    }
+    v
+}
+
+/// The add-ons that build on the entries in `gone` (root, entry), and then on those, each with the entry it builds on:
+/// entries whose scripts import a module only `gone` declares, or use a class or function `gone` defines in a module
+/// they import or add to. Left behind, redscript can't compile them, and that stops every script mod.
+fn addons(idx: &[Script], mut gone: Vec<(usize, String)>) -> Vec<(usize, String, String)> {
+    let mut decl: BTreeMap<&str, Vec<&Script>> = BTreeMap::new();
+    for s in idx { if let Some(m) = &s.module { decl.entry(m).or_default().push(s) } }
+    fn module<'a>(decl: &BTreeMap<&str, Vec<&Script>>, p: &'a str) -> Option<&'a str> {    // "A.B.Thing" -> "A.B", if A.B is declared
+        let mut q = p;
+        loop { if decl.contains_key(q) { return Some(q) } q = &q[..q.rfind('.')?] }
+    }
+    let mut found = vec![];
+    loop {
+        let out = |s: &Script| gone.iter().any(|(r, u)| *r == s.root && *u == s.unit);
+        let mut new: Vec<(usize, String, String)> = vec![];
+        for s in idx.iter().filter(|s| !out(s)) {
+            if new.iter().any(|(r, u, _)| *r == s.root && *u == s.unit) { continue }
+            let base = s.imports.iter().filter_map(|p| module(&decl, p)).map(|m| (m, true)).chain(s.module.as_deref().map(|m| (m, false))).find_map(|(m, imported)| {
+                let theirs: Vec<&Script> = decl[m].iter().copied().filter(|o| out(o)).collect();
+                let all = imported && theirs.len() == decl[m].len();
+                theirs.into_iter().find(|o| all || o.defs.iter().any(|d| s.names.contains(d) && !s.defs.contains(d))).map(|o| o.unit.clone())
+            });
+            if let Some(b) = base { new.push((s.root, s.unit.clone(), b)) }
+        }
+        if new.is_empty() { return found }
+        gone.extend(new.iter().map(|(r, u, _)| (*r, u.clone())));
+        found.extend(new);
+    }
+}
 
 /// The RED4ext plugin or redscript mod folder a path points into: "red4ext/plugins/ArchiveXL/ArchiveXL.dll" -> "red4ext/plugins/archivexl".
 fn mod_folder(d: &str) -> Option<String> {
@@ -464,10 +579,15 @@ impl Env {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status { Red, Gray, Green }
 
+/// Why Remove offers an entry: the mod's own, a **Companion** (same name), or part of an add-on that builds on the
+/// named entry.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Part { Own, Kin, Uses(String) }
+
 pub struct Row {
     pub name: String, pub nexus_id: Option<u32>, pub version: Option<String>, pub status: Status, pub why: String, pub notes: Vec<Note>,
-    pub remove: Vec<(String, bool)>,    // red mods: its entries in the game folder, and whether each is its own (else same name)
-    pub mo2: Vec<String>,               // red mods: the Mod Organizer 2 mods that hold its files
+    pub remove: Vec<(String, Part)>,    // red mods: its entries in the game folder, then those of the add-ons that build on it
+    pub mo2: Vec<String>,               // red mods: the Mod Organizer 2 mods that hold its files or such an add-on
 }
 
 pub struct Report {
@@ -500,19 +620,37 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         .flat_map(|d| files(&d)).filter_map(|p| p.strip_prefix(r).ok().map(|x| x.to_string_lossy().replace('\\', "/")))
         .filter(|rel| unit(rel).as_deref() == Some(rel.as_str())).collect()).collect();
     let protect: Vec<String> = m.framework.iter().flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
+    let framework = |u: &str| protect.iter().any(|p| wild(p, u));
+    let matching = |own: &[String], kin: bool| {                    // (root, entry, own?), its own first
+        let keys: Vec<String> = own.iter().map(|u| key(u)).filter(|k| !k.is_empty()).collect();
+        let mut v: Vec<(usize, String, bool)> = entries.iter().enumerate().flat_map(|(r, list)| list.iter().map(move |u| (r, u))).filter_map(|(r, u)| {
+            let mine = own.iter().any(|o| wild(o, u));
+            ((mine || kin && keys.iter().any(|k| wild(k, &key(u)))) && !framework(u)).then(|| (r, u.clone(), mine))
+        }).collect();
+        v.sort_by_key(|(_, u, mine)| (!mine, u.to_lowercase()));
+        v
+    };
+    // ...then the add-ons whose scripts build on what it takes from the game folder (the last root), with their companions
+    let (g, index) = (roots.len() - 1, OnceCell::new());
     let pieces = |own: &[String], kin: bool| {
         let own: Vec<String> = own.iter().filter_map(|p| unit(p)).collect();
-        let keys: Vec<String> = own.iter().map(|u| key(u)).filter(|k| !k.is_empty()).collect();
-        let (mut here, mut mo2): (Vec<(String, bool)>, Vec<String>) = (vec![], vec![]);
-        for (r, list) in roots.iter().zip(&entries) {
-            for u in list {
-                let mine = own.iter().any(|o| wild(o, u));
-                if !(mine || kin && keys.iter().any(|k| wild(k, &key(u)))) || protect.iter().any(|p| wild(p, u)) { continue }
-                if *r == game { if !here.iter().any(|(h, _)| h == u) { here.push((u.clone(), mine)) } }
-                else if !mo2.contains(&name(r)) { mo2.push(name(r)) }
+        let mut found: Vec<(usize, String, Part)> = matching(&own, kin).into_iter().map(|(r, u, mine)| (r, u, if mine { Part::Own } else { Part::Kin })).collect();
+        let gone: Vec<(usize, String)> = found.iter().filter(|f| f.0 == g).map(|f| (g, f.1.clone())).collect();
+        if !gone.is_empty() {
+            let mut users = addons(index.get_or_init(|| scripts(&roots)), gone);
+            users.sort_by_key(|(_, u, _)| u.to_lowercase());
+            for (r, u, base) in users.into_iter().filter(|(_, u, _)| !framework(u)) {
+                let n = base.rsplit('/').next().unwrap_or(&base);
+                let by = Part::Uses(n.strip_suffix(".reds").unwrap_or(n).to_string());
+                if r == g { found.extend(matching(std::slice::from_ref(&u), true).into_iter().map(|(r, u, _)| (r, u, by.clone()))) }
+                else { found.push((r, u, by)) }
             }
         }
-        here.sort_by_key(|(u, mine)| (!mine, u.to_lowercase()));
+        let (mut here, mut mo2): (Vec<(String, Part)>, Vec<String>) = (vec![], vec![]);
+        for (r, u, part) in found {
+            if r != g { if !mo2.contains(&name(roots[r])) { mo2.push(name(roots[r])) } }
+            else if !here.iter().any(|(h, _)| *h == u) { here.push((u, part)) }
+        }
         (here, mo2)
     };
     let mut refused = vi.map_or(vec![], |v| wrong_runtime(&roots, v.0));
@@ -627,7 +765,8 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
     for x in &r.rows {
         s += &format!("{:?}\t{}\t{}\t{}\t{}\n", x.status, x.name, x.version.as_deref().unwrap_or("-"), x.why, x.nexus_id.map_or("-".into(), nexus_url));
         for n in &x.notes { s += &format!("\tnote: {} ({}, {})\n", n.text, n.source, n.date) }
-        if !x.remove.is_empty() { s += &format!("\tcan remove: {}\n", x.remove.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", ")) }
+        let take = |(p, k): &(String, Part)| match k { Part::Uses(b) => format!("{p} (builds on {b})"), _ => p.clone() };
+        if !x.remove.is_empty() { s += &format!("\tcan remove: {}\n", x.remove.iter().map(take).collect::<Vec<_>>().join(", ")) }
         if !x.mo2.is_empty() { s += &format!("\tin Mod Organizer 2: {}\n", x.mo2.join(", ")) }
     }
     if !r.unlisted.is_empty() { s += &format!("Unlisted native plugins: {}\n", r.unlisted.join(", ")) }
@@ -859,7 +998,7 @@ mod tests {
         assert!(old.status == Status::Red && old.nexus_id.is_none() && old.why.contains("last launch (2026-11-04 03:05)") && old.why.contains("an older game"));
         let ed = r.rows.iter().find(|x| x.name == "Edits").unwrap();
         assert!(ed.status == Status::Red && ed.why.contains("ArchiveXL skipped its world edits in 2 places"), "{}", ed.why);
-        assert_eq!(ed.remove, [("archive/pc/mod/Edits.xl".to_string(), true), ("archive/pc/mod/Edits.archive".into(), false)]);
+        assert_eq!(ed.remove, [("archive/pc/mod/Edits.xl".to_string(), Part::Own), ("archive/pc/mod/Edits.archive".into(), Part::Kin)]);
         assert!(!r.unlisted.contains(&"Old".to_string()) && r.unlisted.contains(&"Gone".to_string()));
 
         let o = root.join("red4ext/plugins/Old/o.dll");                    // updated since that launch: no longer reported
@@ -920,10 +1059,10 @@ mod tests {
                      ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", Some([1, 20, 0, 0])), ("r6/scripts/ArchiveXL/x.reds", None)];
         let (r, _) = run(&list, [2, 5, 0, 0], &files, "remove", &NO_ENV);
         let of = |n: &str| r.rows.iter().find(|x| x.name == n).unwrap();
-        assert_eq!(of("Broken").remove, [("r6/scripts/Broken".to_string(), true), ("archive/pc/mod/Broken.archive".into(), false),
-            ("archive/pc/mod/Broken.archive.xl".into(), false), ("bin/x64/plugins/cyber_engine_tweaks/mods/Broken".into(), false), ("r6/tweaks/broken".into(), false)]);
+        assert_eq!(of("Broken").remove, [("r6/scripts/Broken".to_string(), Part::Own), ("archive/pc/mod/Broken.archive".into(), Part::Kin),
+            ("archive/pc/mod/Broken.archive.xl".into(), Part::Kin), ("bin/x64/plugins/cyber_engine_tweaks/mods/Broken".into(), Part::Kin), ("r6/tweaks/broken".into(), Part::Kin)]);
         assert!(of("ArchiveXL").status == Status::Red && of("ArchiveXL").remove.is_empty(), "a framework is never offered");
-        assert_eq!(of("Old leftover").remove, [("archive/pc/mod/Old-1.0.archive".to_string(), true)]);
+        assert_eq!(of("Old leftover").remove, [("archive/pc/mod/Old-1.0.archive".to_string(), Part::Own)]);
         assert_eq!(unit("bin/x64/plugins/cyber_engine_tweaks/scripts/x.lua"), None);
         assert_eq!(unit("bin/x64/plugins/Fix.ASI").as_deref(), Some("bin/x64/plugins/Fix.ASI"));
         assert_eq!(unit("Archive/PC/Mod/a.archive").as_deref(), Some("Archive/PC/Mod/a.archive"));
@@ -933,6 +1072,39 @@ mod tests {
         let r = scan(&Manifest::parse(&list).unwrap(), &game, std::slice::from_ref(&m), &NO_ENV).unwrap();
         let b = r.rows.iter().find(|x| x.name == "Broken").unwrap();
         assert!(b.remove.is_empty() && b.mo2 == [m.file_name().unwrap().to_string_lossy().into_owned()], "MO2's files are left to MO2");
+    }
+
+    #[test]
+    fn addons_that_build_on_it() {
+        let (m, i, d, n) = reds("\u{feff}module A.B // c\nimport X.Y.*\nimport X.{P, Q}\n@if(ModuleExists(\"Z\"))\n\nimport Z.*\n/* import W.* */\nlet s = \"import V.*\";\n\
+            public class K { func Inner() {} }\nfunc Top() {}\n@wrapMethod(K) func Wrapped() {}\nenum E { A = 0 }\n");
+        assert_eq!((m.as_deref(), i, d), (Some("A.B"), vec!["X.Y".to_string(), "X".into()], vec!["K".to_string(), "Top".into(), "E".into()]));
+        assert!(n.contains("Inner") && !n.contains("V") && !n.contains("W"));
+
+        let list = format!("{LIST}\n[[mod]]\nname = \"Base\"\nnexus_id = 9\ndetect = [\"r6/scripts/Base\"]\nnotes = [{{ build = \"2.5\", text = \"t\", source = \"s\", date = \"d\" }}]\n");
+        let code = [("r6/scripts/Base/core.reds", "module Base.Core\npublic class BaseThing {}\npublic func Helper() -> Int32 { return 1; }\n"),
+            ("r6/scripts/Base/ui.reds", "module Base.UI\npublic class BaseView {}\n"),
+            ("r6/scripts/Addon/a.reds", "module Addon.Stuff\nimport Base.UI.*\npublic class AddonThing {}\n"),        // only Base declares Base.UI
+            ("r6/scripts/Second.reds", "import Addon.Stuff.AddonThing\n"),                                                  // builds on Addon
+            ("r6/scripts/Patch/p.reds", "module Base.Core\n@wrapMethod(BaseThing)\npublic func Tick() { Helper(); }\n"),   // adds to Base's module
+            ("red4ext/plugins/Gadget/g.reds", "import Base.UI.BaseView\n"),
+            ("red4ext/plugins/ArchiveXL/x.reds", "import Base.UI.*\n"),                                                    // a framework: never offered
+            ("r6/scripts/Quiet/q.reds", "module Base.Core\n// BaseThing\nclass Own { func F() -> String { return \"Helper\"; } }\n/* import Base.UI.* */\n"),
+            ("r6/scripts/Optional/o.reds", "@if(ModuleExists(\"Base.UI\"))\nimport Base.UI.*\n\n@if(ModuleExists(\"Base.UI\")) import Base.UI.BaseView\n"),
+            ("r6/scripts/Shared/s.reds", "import Base.Core.*\npublic class Helper { func F() -> ref<Helper> { return new Helper(); } }\n")];   // its own Helper
+        let files: Vec<(&str, Option<[u16; 4]>)> = code.iter().map(|c| (c.0, None)).chain([("archive/pc/mod/Base.archive", None), ("archive/pc/mod/Addon.archive", None)]).collect();
+        let game = install("addons", [2, 5, 0, 0], &files);
+        let fan = install("addons-mo2-Fan Mod", [0; 4], &[("r6/scripts/Fan/f.reds", None)]);
+        for (rel, c) in code { fs::write(game.join(rel), c).unwrap() }
+        fs::write(fan.join("r6/scripts/Fan/f.reds"), "import Base.UI.BaseView\n").unwrap();
+        let r = scan(&Manifest::parse(&list).unwrap(), &game, std::slice::from_ref(&fan), &NO_ENV).unwrap();
+        let base = r.rows.iter().find(|x| x.name == "Base").unwrap();
+        let on = |b: &str| Part::Uses(b.into());
+        assert_eq!(base.remove, [("r6/scripts/Base".to_string(), Part::Own), ("archive/pc/mod/Base.archive".into(), Part::Kin),
+            ("r6/scripts/Addon".into(), on("Base")), ("archive/pc/mod/Addon.archive".into(), on("Base")), ("r6/scripts/Patch".into(), on("Base")),
+            ("r6/scripts/Second.reds".into(), on("Addon")), ("red4ext/plugins/Gadget".into(), on("Base"))]);
+        assert_eq!(base.mo2, [fan.file_name().unwrap().to_string_lossy().into_owned()], "an add-on in MO2 is left to MO2");
+        assert!(text(&r, "", "").contains("\tcan remove: r6/scripts/Base, archive/pc/mod/Base.archive, r6/scripts/Addon (builds on Base),"));
     }
 
     #[test]

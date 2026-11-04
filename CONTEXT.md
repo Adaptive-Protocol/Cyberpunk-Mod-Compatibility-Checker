@@ -39,6 +39,10 @@ _Avoid_: mod file (a mod usually has several entries)
 **Companion**:
 A **Mod entry** in another mod folder with the same name as a red mod's own entry (e.g. r6/tweaks/X next to r6/scripts/X). It's offered with the mod and marked "same name".
 
+**Add-on**:
+A mod whose scripts build on a red mod: they import a module only that mod declares, or use a class or function it defines in a module they import or add to (EquipmentEx's add-ons add to its module). Without the red mod, redscript can't compile the add-on, which stops every script mod, so Remove offers the add-on and its **Companions** with the mod, marked "builds on X". Mods that build on an add-on count too. An import under `@if(ModuleExists(..))` is optional and doesn't count.
+_Avoid_: dependency (a **Dependent mod** depends on a **Framework**)
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine

@@ -5,7 +5,7 @@ mod check;
 mod locate;
 mod remove;
 
-use check::{Manifest, Report, Status};
+use check::{Manifest, Part, Report, Status};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
 use std::{env, path::{Path, PathBuf}, thread::{self, JoinHandle}, time::Duration};
 
@@ -34,11 +34,11 @@ const UNLISTED_TIP: &str = "Native plugins hook the game directly and often brea
 
 type Job = JoinHandle<Result<Report, String>>;
 
-/// An entry the Remove dialog lists: (path, the mod's own or found under the same name, ticked).
-type Entry = (String, bool, bool);
+/// An entry the Remove dialog lists: (path, why it's offered, ticked).
+type Entry = (String, Part, bool);
 
-/// The Remove dialog: each mod (name, why, entries), and whether the user chose Delete.
-struct Removal { mods: Vec<(String, String, Vec<Entry>)>, delete: bool }
+/// The Remove dialog: each mod (name, why, entries, Mod Organizer 2 mods to untick), and whether the user chose Delete.
+struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>)>, delete: bool }
 
 struct App {
     game: String, mo2: String, filter: String,
@@ -169,7 +169,7 @@ impl App {
                 let new = !seen.contains(&p.as_str());
                 seen.push(p);
                 new
-            }).map(|(p, own)| (p.clone(), *own, true)).collect())).collect();
+            }).map(|(p, part)| (p.clone(), part.clone(), true)).collect(), x.mo2.clone())).collect();
             self.removal = Some(Removal { mods, delete: false });
         }
     }
@@ -186,14 +186,22 @@ impl App {
             ui.heading(match rm.mods.as_slice() { [one] => format!("Remove {}", one.0), all => format!("Remove {} mods", all.len()) });
             ui.label(REMOVE_INFO);
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries) in &mut rm.mods {
+            egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries, mo2) in &mut rm.mods {
                 ui.label(RichText::new(name.as_str()).strong()).on_hover_text(why.as_str());
-                for (p, own, tick) in entries.iter_mut() {
+                for (p, part, tick) in entries.iter_mut() {
                     ui.horizontal(|ui| {
                         ui.add_space(14.0);
                         ui.checkbox(tick, RichText::new(p.as_str()).monospace());
-                        if !*own { ui.weak("same name").on_hover_text("Found elsewhere under the same name, so likely part of this mod"); }
+                        match part {
+                            Part::Own => {}
+                            Part::Kin => { ui.weak("same name").on_hover_text("Found elsewhere under the same name, so likely part of this mod"); }
+                            Part::Uses(b) => { ui.weak(format!("builds on {b}")).on_hover_text(format!("Part of a mod whose scripts use {b}'s code. \
+                                Left in place without {b}, redscript can't compile it, and that stops every script mod.")); }
+                        }
                     });
+                }
+                if !mo2.is_empty() {
+                    ui.horizontal(|ui| { ui.add_space(14.0); ui.weak(format!("Also in Mod Organizer 2: {}. Untick {} there.", mo2.join(", "), if mo2.len() == 1 { "it" } else { "them" })) });
                 }
             });
             ui.separator();
@@ -209,7 +217,7 @@ impl App {
         });
         let Some(delete) = run else { if !close && !modal.should_close() { self.removal = Some(rm) } return };
         let (mut done, mut failed) = (vec![], vec![]);
-        for (name, why, entries) in &rm.mods {
+        for (name, why, entries, _) in &rm.mods {
             let paths: Vec<String> = entries.iter().filter(|e| e.2).map(|e| e.0.clone()).collect();
             if paths.is_empty() { continue }
             let r = if delete { remove::delete(&game, name, why, &paths) } else { remove::backup(&game, name, why, &paths).map(|_| ()) };

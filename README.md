@@ -35,7 +35,7 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
 
 ## Backing up and removing a mod
 
-Red mods have a **Remove…** button, and **Remove all…** takes every removable red mod at once. Close the game first. The window lists every folder and file the mod has in your mod folders, including ones with the same name in other mod folders (marked "same name"). Untick any you want to keep, then choose:
+Red mods have a **Remove…** button, and **Remove all…** takes every removable red mod at once. Close the game first. The window lists every folder and file the mod has in your mod folders, including ones with the same name in other mod folders (marked "same name"). It also lists the mods whose scripts build on it, with their files (marked "builds on …"): without it, redscript can't compile them, and that stops every script mod. If one of them is in Mod Organizer 2, the window says to untick it there. Untick any you want to keep, then choose:
 
 - **Back up and remove** moves them into `_mod_backups/<date> <mod>/` in your game folder, keeping their folder paths, with a `backup.toml` that records what was moved and why. Nothing is deleted. The move stays on the same drive, and if any part fails, everything already moved is put back.
 - **Delete permanently…** asks a second time, then deletes them for good.
