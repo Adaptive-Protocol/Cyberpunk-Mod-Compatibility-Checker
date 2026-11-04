@@ -8,10 +8,15 @@
 # detect:     paths relative to the game folder; any one present means installed; the first one is read for a version.
 # min:        lowest version known to work, per game build. build_locked: breaks on every new game build.
 # needs:      framework names. notes: known problems, each with its source and date.
+# parts:      other files it needs in order to load, such as its loader in bin/x64; red when one is missing.
+# vcredist:   lowest Microsoft Visual C++ Redistributable (x64) it runs on, checked on Windows.
+# pattern:    a known clash between files, such as an old version left next to its replacement: red when every path
+#             in `all` is installed and none in `none` is. `build` limits it to one game build. Each has text, source and date.
+# Paths may use * within a name, e.g. "archive/pc/mod/OldMod-*.archive".
 #
 # 2026-11-04 draft: seeded from the maintainer's updated 2.5 install. `min` values are the installed versions
-# (CET: the release made for 2.5). `needs` were inferred from each archive's file types and still need checking
-# against each mod page's requirements.
+# (CET: the release made for 2.5; ArchiveXL: its first release for 2.5). `needs` were inferred from each archive's
+# file types and still need checking against each mod page's requirements.
 
 schema = 1
 updated = "2026-11-04"
@@ -24,12 +29,15 @@ confirmed = false
 name = "RED4ext"
 nexus_id = 2380
 detect = ["red4ext/RED4ext.dll"]
+parts = ["bin/x64/winmm.dll"]                 # RED4ext's loader
 min = { "2.5" = "1.31.0" }
 
 [[framework]]
 name = "Cyber Engine Tweaks"
 nexus_id = 107
 detect = ["bin/x64/plugins/cyber_engine_tweaks.asi"]
+parts = ["bin/x64/version.dll"]               # the ASI loader that ships with CET
+vcredist = "14.40.33810"                      # CET wiki, troubleshooting (wiki.redmodding.org/cyber-engine-tweaks), 2026-11-04
 build_locked = true
 min = { "2.5" = "1.38.0" }
 
@@ -42,7 +50,7 @@ detect = ["engine/tools/scc.exe"]
 name = "ArchiveXL"
 nexus_id = 4198
 detect = ["red4ext/plugins/ArchiveXL/ArchiveXL.dll"]
-min = { "2.5" = "1.28.6" }
+min = { "2.5" = "1.28.0" }                    # 1.28.0, 2026-10-25: "Updated compatibility to game patch 2.5" (release notes)
 needs = ["RED4ext"]
 
 [[framework]]

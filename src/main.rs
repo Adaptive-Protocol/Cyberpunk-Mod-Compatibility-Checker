@@ -12,12 +12,15 @@ const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
 const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), ", MIT license. \
     It only reads files: it never changes, moves or deletes anything, and never connects to the internet. \
     \"Open on Nexus\" hands the mod's page to your own web browser.\n\n\
-    The compatibility list is curated by the maintainer and built into each release. A newer compat.toml placed next to the app is used instead.\n\n\
+    The compatibility list is curated by the maintainer and built into each release. A newer compat.toml placed next to the app is used instead. \
+    Besides your mods, the app reads the logs from your last launch (RED4ext's, your mods' own, and Advanced Crash Reporter's if you use it) \
+    and, on Windows, the version of the Visual C++ runtime.\n\n\
     Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch \
     and the rows with coloured status circles. Framework background from the RED Modding wiki (wiki.redmodding.org). \
     The verdicts, list format and layout are this app's own.\n\n\
     Built with egui/eframe, rfd, serde and toml. Their licenses are in THIRD-PARTY-NOTICES.txt.\n\n\
     The code was written by an AI assistant (Claude, made by Anthropic) at the maintainer's direction.");
+const LAST_TIP: &str = "From the logs of the last time the game ran. They update the next time you launch it.";
 const UNLISTED_TIP: &str = "Native plugins hook the game directly and often break after a patch. These aren't in the compatibility list.";
 
 type Job = JoinHandle<Result<Report, String>>;
@@ -80,6 +83,27 @@ impl App {
         let of = |s| rows.iter().copied().filter(move |x| x.status == s).collect::<Vec<_>>();
         let unlisted: Vec<_> = r.unlisted.iter().filter(|n| n.to_lowercase().contains(&q)).collect();
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if let Some(l) = &r.last {
+                let n = l.errors.len() + usize::from(l.crash.is_some());
+                let title = format!("Your last launch, {}: {}", l.when, match (&l.crash, l.errors.len()) {
+                    (Some(_), 0) => "it crashed".to_string(),
+                    (Some(_), e) => format!("it crashed, and mods logged {}", count(e, "error")),
+                    (None, e) => format!("mods logged {}", count(e, "error")),
+                });
+                group(ui, "last", Color32::RED, title, n, true, |ui| {
+                    ui.weak(LAST_TIP);
+                    if let Some((c, report)) = &l.crash {
+                        ui.horizontal(|ui| { dot(ui, Color32::RED, report); ui.add(egui::Label::new(RichText::new(c).strong()).truncate()).on_hover_text(format!("{c}\n\nReport: {report}")) });
+                    }
+                    for (who, msg) in &l.errors {
+                        ui.horizontal(|ui| {
+                            dot(ui, Color32::RED, "");
+                            cell(ui, 190.0, |ui| ui.add(egui::Label::new(RichText::new(who).strong()).truncate()));
+                            ui.add(egui::Label::new(msg).truncate()).on_hover_text(msg);
+                        });
+                    }
+                });
+            }
             for (s, title, open) in [(Status::Red, "Likely to break", true), (Status::Gray, "Not confirmed", true), (Status::Green, "OK", false)] {
                 let list = of(s);
                 group(ui, title, color(s), format!("{title}: {}", count(list.len(), "mod")), list.len(), open, |ui| for x in &list {
@@ -88,10 +112,12 @@ impl App {
                         cell(ui, 190.0, |ui| ui.label(RichText::new(&x.name).strong()));
                         cell(ui, 60.0, |ui| ui.weak(x.version.as_deref().unwrap_or("")));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let url = check::nexus_url(x.nexus_id);
-                            if ui.small_button("Copy link").on_hover_text(&url).clicked() { ui.ctx().copy_text(url.clone()) }
-                            if ui.small_button("Open on Nexus").on_hover_text("Opens the mod's page in your web browser").clicked() {
-                                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                            if let Some(id) = x.nexus_id {
+                                let url = check::nexus_url(id);
+                                if ui.small_button("Copy link").on_hover_text(&url).clicked() { ui.ctx().copy_text(url.clone()) }
+                                if ui.small_button("Open on Nexus").on_hover_text("Opens the mod's page in your web browser").clicked() {
+                                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                                }
                             }
                             ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(egui::Label::new(&x.why).truncate())).inner.on_hover_text(&x.why);
                         });
@@ -99,7 +125,7 @@ impl App {
                     for n in &x.notes { ui.horizontal(|ui| { ui.add_space(24.0); ui.label(format!("• {} ({}, {})", n.text, n.source, n.date)) }); }
                 });
             }
-            group(ui, "unlisted", Color32::GRAY, format!("Unlisted native plugins: {}", unlisted.len()), unlisted.len(), false, |ui| {
+            group(ui, "unlisted", Color32::GRAY, format!("Unlisted native plugins: {}", unlisted.len()), unlisted.len(), true, |ui| {
                 ui.weak(UNLISTED_TIP);
                 for n in &unlisted { ui.horizontal(|ui| { dot(ui, Color32::GRAY, UNLISTED_TIP); ui.label(n.as_str()) }); }
             });
@@ -191,6 +217,7 @@ impl eframe::App for App {
                     ui.weak("·");
                 }
                 ui.weak(format!("Compatibility list {} ({})", self.list.updated, self.source));
+                if let Some(Ok(Report { last: Some(l), .. })) = &self.report { ui.weak("·"); ui.weak(format!("Last launch {}", l.when)); }
                 if self.job.is_some() { ui.spinner(); }
             });
             if let Some(w) = &self.warning { ui.colored_label(Color32::YELLOW, w); }

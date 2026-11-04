@@ -13,15 +13,15 @@ fn values<'a>(text: &'a str, key: &'a str) -> impl Iterator<Item = String> + 'a 
     })
 }
 
+fn steam_roots() -> Vec<PathBuf> {
+    if cfg!(windows) { return vec!["C:/Program Files (x86)/Steam".into(), "C:/Program Files/Steam".into()] }
+    [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"].iter().map(|p| home().join(p)).collect()
+}
+
 /// The first Cyberpunk 2077 install found, or None (the user picks it then).
 pub fn find_game() -> Option<PathBuf> {
     let h = home();
-    let steam_roots: Vec<PathBuf> = if cfg!(windows) {
-        vec!["C:/Program Files (x86)/Steam".into(), "C:/Program Files/Steam".into()]
-    } else {
-        [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"].iter().map(|p| h.join(p)).collect()
-    };
-    let mut c: Vec<PathBuf> = steam_roots.iter().flat_map(|s| {
+    let mut c: Vec<PathBuf> = steam_roots().iter().flat_map(|s| {
         let libs = fs::read_to_string(s.join("steamapps/libraryfolders.vdf")).map(|t| values(&t, "path").map(PathBuf::from).collect::<Vec<_>>()).unwrap_or_default();
         [s.clone()].into_iter().chain(libs).map(|l| l.join("steamapps/common/Cyberpunk 2077")).collect::<Vec<_>>()
     }).collect();
@@ -35,6 +35,50 @@ pub fn find_game() -> Option<PathBuf> {
         c.extend(["Games/Heroic/Cyberpunk 2077", "Games/Heroic/Cyberpunk2077"].map(|p| h.join(p)));
     }
     c.into_iter().find(|p| is_game(p))
+}
+
+/// DLLs set to load from the game folder ("native") in a Wine prefix's user.reg.
+fn reg_overrides(reg: &str) -> Vec<String> {
+    let mut on = false;
+    reg.lines().filter_map(|l| {
+        if l.starts_with('[') { on = l.starts_with("[Software\\\\Wine\\\\DllOverrides]"); return None }
+        let (k, v) = l.split_once('=').filter(|_| on)?;
+        v.trim().trim_matches('"').starts_with('n').then(|| k.trim().trim_matches('"').trim_start_matches('*').to_lowercase())
+    }).collect()
+}
+
+/// DLLs set to native by WINEDLLOVERRIDES in Cyberpunk's (Steam app 1091500) launch options in a localconfig.vdf,
+/// e.g. `WINEDLLOVERRIDES="winmm,version=n,b" %command%`.
+fn launch_overrides(vdf: &str) -> Vec<String> {
+    let mut depth: Option<i32> = None;                         // inside the app's block, how deep
+    for l in vdf.lines().map(str::trim) {
+        match depth {
+            None if l == "\"1091500\"" => depth = Some(0),
+            Some(d) if l == "{" => depth = Some(d + 1),
+            Some(d) if l == "}" => depth = (d > 1).then_some(d - 1),
+            Some(1) if l.starts_with("\"LaunchOptions\"") => {
+                let opts = l["\"LaunchOptions\"".len()..].trim().trim_matches('"').replace("\\\"", "\"");
+                let Some(v) = opts.split("WINEDLLOVERRIDES=").nth(1) else { return vec![] };
+                let v = v.strip_prefix('"').map_or_else(|| v.split_whitespace().next().unwrap_or(""), |q| q.split('"').next().unwrap_or(""));
+                return v.split(';').filter_map(|e| e.split_once('=')).filter(|(_, mode)| mode.trim().starts_with('n'))
+                    .flat_map(|(dlls, _)| dlls.split(',').map(|d| d.trim().to_lowercase())).collect();
+            }
+            _ => {}
+        }
+    }
+    vec![]
+}
+
+/// On Linux under Steam's Proton, the DLLs Wine loads from the game folder instead of its own: from the game's
+/// prefix and its launch options. None when that can't be told (Windows, or no Proton prefix next to the game).
+pub fn wine_overrides(game: &Path) -> Option<Vec<String>> {
+    if cfg!(windows) { return None }
+    let steamapps = game.parent()?.parent()?;                  // <library>/steamapps/common/<game folder>
+    let mut v = reg_overrides(&fs::read_to_string(steamapps.join("compatdata/1091500/pfx/user.reg")).ok()?);
+    for user in steam_roots().iter().flat_map(|r| fs::read_dir(r.join("userdata")).into_iter().flatten().flatten()) {
+        if let Ok(t) = fs::read_to_string(user.path().join("config/localconfig.vdf")) { v.extend(launch_overrides(&t)) }
+    }
+    Some(v)
 }
 
 /// Settings from a ModOrganizer.ini, with Qt's `@ByteArray(...)` wrapper and doubled backslashes removed.
@@ -66,7 +110,8 @@ pub fn mo2_mods(instance: &Path) -> Result<Vec<PathBuf>, String> {
     let list = fs::read_to_string(dir("profiles_directory", "profiles").join(&profile).join("modlist.txt"))
         .map_err(|_| format!("Couldn't read the mod list of MO2 profile {profile:?}."))?;
     let mods = dir("mod_directory", "mods");
-    Ok(list.lines().filter_map(|l| l.strip_prefix('+')).map(|n| mods.join(n.trim())).filter(|p| p.is_dir()).collect())
+    let overwrite = dir("overwrite_directory", "overwrite");   // what the game wrote through MO2, such as logs; above every mod
+    Ok([overwrite].into_iter().chain(list.lines().filter_map(|l| l.strip_prefix('+')).map(|n| mods.join(n.trim()))).filter(|p| p.is_dir()).collect())
 }
 
 #[cfg(test)]
@@ -91,5 +136,17 @@ mod tests {
         assert_eq!(ini(&fs::read_to_string(d.join("ModOrganizer.ini")).unwrap(), "gamePath").unwrap(), "D:\\Games\\Cyberpunk 2077");
         assert!(same_dir("D:\\Games\\Cyberpunk 2077\\", Path::new("d:/games/cyberpunk 2077")));
         assert_eq!(mo2_mods(&d).unwrap(), [d.join("mods/B"), d.join("mods/A")]);
+        fs::create_dir_all(d.join("overwrite")).unwrap();
+        assert_eq!(mo2_mods(&d).unwrap()[0], d.join("overwrite"));
+    }
+
+    #[test]
+    fn wine_dll_overrides() {
+        let reg = "WINE REGISTRY Version 2\n\n[Software\\\\Wine\\\\DllOverrides] 1730000000\n#time=1\n\"*d3dcompiler_47\"=\"native\"\n\"version\"=\"native,builtin\"\n\"winmm\"=\"builtin\"\n\n[Software\\\\Other] 1\n\"x\"=\"native\"\n";
+        assert_eq!(reg_overrides(reg), ["d3dcompiler_47", "version"]);
+        let vdf = "\"apps\"\n{\n\t\"1091500\"\n\t{\n\t\t\"cloud\"\n\t\t{\n\t\t\t\"LaunchOptions\"\t\t\"nested\"\n\t\t}\n\t\t\"LaunchOptions\"\t\t\"WINEDLLOVERRIDES=\\\"winmm,version=n,b\\\" %command%\"\n\t}\n}\n";
+        assert_eq!(launch_overrides(vdf), ["winmm", "version"]);
+        assert_eq!(launch_overrides("\"1091500\"\n{\n\"LaunchOptions\" \"WINEDLLOVERRIDES=winmm=n;version=b %command%\"\n}"), ["winmm"]);
+        assert!(launch_overrides("\"1091501\"\n{\n\"LaunchOptions\" \"WINEDLLOVERRIDES=winmm=n\"\n}").is_empty());
     }
 }
