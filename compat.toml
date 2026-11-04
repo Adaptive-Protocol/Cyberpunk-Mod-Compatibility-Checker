@@ -16,7 +16,7 @@
 #             mod folder); leave it out when the fix isn't a removal.
 # Paths may use * within a name, e.g. "archive/pc/mod/OldMod-*.archive".
 #
-# 2026-11-04 draft: seeded from the maintainer's updated 2.5 install. `min` values are the installed versions
+# 2026-11-04: seeded from the maintainer's updated 2.5 install, and confirmed by a launch test on it. `min` values are the installed versions
 # (CET: the release made for 2.5; ArchiveXL: its first release for 2.5). `needs` were inferred from each archive's
 # file types and still need checking against each mod page's requirements.
 
@@ -25,7 +25,7 @@ updated = "2026-11-04"
 
 [[build]]
 game = "2.5"
-confirmed = false
+confirmed = true
 
 [[framework]]
 name = "RED4ext"
