@@ -236,8 +236,8 @@ fn error_line(l: &str) -> Option<(Option<&str>, &str)> {
     (error && !rest.is_empty()).then_some((who, rest))
 }
 
-/// A mod the game won't run: a plugin RED4ext refused or one built for another game runtime, or a script mod
-/// redscript couldn't compile. `folder` is its folder, lowercase, such as "red4ext/plugins/archivexl".
+/// A mod the game won't run: a plugin RED4ext refused or one built for another game runtime, a script mod redscript
+/// couldn't compile, or world edits ArchiveXL skipped. `folder` is its entry, lowercase, such as "red4ext/plugins/archivexl".
 #[derive(Clone, Debug)]
 pub struct Refused { pub folder: String, pub name: String, pub version: Option<String>, pub why: String }
 
@@ -253,6 +253,38 @@ pub struct Last {
 fn older(r: &str, exe: &str) -> &'static str { if cmp_ver(r, exe).is_lt() { "an older" } else { "a newer" } }
 
 fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "" } else { "s" }) }
+
+/// "a", "a and b", "a, b and c"
+fn list(v: &[String]) -> String { match v { [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")), _ => v.concat() } }
+
+/// One redscript error: (code, file, message), such as ("UNRESOLVED_IMPORT", "a.reds", "module 'X' has no members or does not exist").
+type Fault<'a> = (&'a str, &'a str, &'a str);
+
+/// Why redscript couldn't compile a mod, from its errors. Mods it builds on that aren't installed, part of it installed
+/// twice and names nothing defines each have their own fix; anything else points to a game update.
+fn cause(errs: &[Fault]) -> String {
+    let (mut imports, mut names): (Vec<String>, Vec<(String, usize)>) = (vec![], vec![]);
+    for (code, _, m) in errs {
+        let Some(n) = m.split('\'').nth(1).filter(|n| !n.is_empty()).map(str::to_string) else { continue };
+        match *code {
+            "UNRESOLVED_IMPORT" => if !imports.contains(&n) { imports.push(n) },
+            "UNRESOLVED_REF" | "UNRESOLVED_TYPE" | "UNRESOLVED_FN" => match names.iter_mut().find(|x| x.0 == n) { Some(x) => x.1 += 1, None => names.push((n, 1)) },
+            _ => {}
+        }
+    }
+    let mods: Vec<String> = imports.iter().filter(|m| !imports.iter().any(|o| m.starts_with(&format!("{o}.")))).cloned().collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.1));               // the most used first: the best hint at what's missing
+    let twice = errs.iter().find(|e| e.0 == "SYM_REDEFINITION").map(|(_, f, m)|
+        (f, m.split("defined at '").nth(1).and_then(|p| p.rsplit(['/', '\\']).next()).and_then(|p| p.split(':').next()).unwrap_or("another file")));
+    if !mods.is_empty() { format!("It builds on {}, which no installed mod provides: install or put back the mod that does, or remove this one too.", list(&mods)) }
+    else if let Some((f, other)) = twice { format!("Part of it is installed twice ({f} repeats {other}): delete the extra copy.") }
+    else if !names.is_empty() {
+        let top: Vec<String> = names.iter().take(3).map(|n| n.0.clone()).collect();
+        format!("It uses {} that nothing installed defines, such as {}: a mod it needs is missing, another mod replaced its files, or it needs an update for this game version.",
+                count(names.len(), "name"), list(&top))
+    }
+    else { format!("{} such as \"{}\": it likely needs an update for this game version.", count(errs.len(), "error"), errs.first().map_or("", |e| e.2)) }
+}
 
 /// Has the mod in `folder` been removed or changed since `at`, when a log reported it?
 fn gone(roots: &[&Path], folder: &str, at: SystemTime) -> bool {
@@ -290,21 +322,23 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
         let t = String::from_utf8_lossy(&b);
         if t.lines().rev().find_map(redscript_stamp).is_some_and(|d| d >= stamp) {
             let lines: Vec<&str> = t.lines().collect();
-            let mut failed: Vec<(String, String, usize, String)> = vec![];      // (folder, name, errors, first message)
+            let mut failed: Vec<(String, String, Vec<Fault>)> = vec![];      // (folder, name, errors)
             for (i, l) in lines.iter().enumerate().filter(|(_, l)| l.starts_with("[ERROR")) {
                 let Some(path) = l.split(" At ").nth(1) else { continue };
                 let bits: Vec<&str> = path.split(['/', '\\']).collect();
                 let Some(f) = bits.iter().rposition(|b| b.eq_ignore_ascii_case("scripts")).and_then(|i| bits.get(i + 1)).filter(|f| !f.contains(".reds")) else { continue };
+                let code = l.split("] [").nth(1).and_then(|c| c.split(']').next()).unwrap_or("");
+                let file = bits.last().and_then(|b| b.split(':').next()).unwrap_or("");
                 let msg = lines.get(i + 3).filter(|_| lines.get(i + 2).is_some_and(|c| c.trim_start().starts_with('^'))).map_or("", |m| m.trim());
-                match failed.iter_mut().find(|x| x.1 == *f) { Some(x) => x.2 += 1, None => failed.push((format!("r6/scripts/{}", f.to_lowercase()), f.to_string(), 1, msg.to_string())) }
+                match failed.iter_mut().find(|x| x.1 == *f) { Some(x) => x.2.push((code, file, msg)), None => failed.push((format!("r6/scripts/{}", f.to_lowercase()), f.to_string(), vec![(code, file, msg)])) }
             }
             failed.retain(|x| !gone(roots, &x.0, at));
             if !failed.is_empty() {
                 last.errors.push(("redscript".into(), format!("Couldn't compile {}, so no script mod ran.", count(failed.len(), "mod"))));
             }
-            for (folder, name, n, msg) in failed {
+            for (folder, name, errs) in failed {
                 last.refused.push(Refused { folder, name, version: None,
-                    why: format!("redscript couldn't compile it at your last launch ({}), which stops every script mod: {} such as \"{msg}\". It likely needs an update for this game version.", last.when, count(n, "error")) });
+                    why: format!("redscript couldn't compile it at your last launch ({}), which stops every script mod. {}", last.when, cause(&errs)) });
             }
         }
     }
@@ -313,12 +347,19 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
     let mut sources: Vec<PathBuf> = logs.iter().cloned().chain(plugin_logs).collect();
     sources.sort_by_key(|p| (log_name(&name(p)).is_none_or(|(w, _)| !w.eq_ignore_ascii_case("red4ext")), p.clone()));   // RED4ext's own first
     let mut per: BTreeMap<String, (usize, String)> = BTreeMap::new();   // log owner -> (errors, name as shown)
+    let mut stale: Vec<(String, Vec<String>, SystemTime)> = vec![];     // ArchiveXL world edits whose target has changed: (.xl, mismatches, log time)
     for p in sources {
         let Some((owner, d)) = log_name(&name(&p)).map(|(w, d)| (w.to_string(), d)) else { continue };
         if d < stamp { continue }
         let Some(b) = read(&p, 16 << 20) else { continue };
+        let at = fs::metadata(&p).and_then(|m| m.modified()).unwrap_or_else(|_| SystemTime::now());
         for l in String::from_utf8_lossy(&b).lines() {
             let Some((tag, msg)) = error_line(l) else { continue };
+            // "X.xl: The target node #15 has type A, but the mod expects B." (or "The target sector has N node(s), ...")
+            if let Some((xl, what)) = msg.split_once(": The target ").filter(|(x, w)| x.to_ascii_lowercase().ends_with(".xl") && w.contains("but the mod expects")) {
+                match stale.iter_mut().find(|s| s.0 == xl) { Some(s) => if !s.1.iter().any(|w| w == what) { s.1.push(what.into()) }, None => stale.push((xl.into(), vec![what.into()], at)) }
+                continue
+            }
             // RED4ext copies the game's own crash report into its log, one error line per field: keep only its message
             if msg.trim_matches(['-', '=', ' ']).is_empty() || ["Crash report", "File:", "Line:", "Condition:"].iter().any(|s| msg.starts_with(s)) { continue }
             let msg = msg.strip_prefix("Message: ").map_or_else(|| msg.to_string(), |m| format!("The game's crash report says: {m}"));
@@ -333,23 +374,38 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
         }
     }
     for (n, who) in per.into_values().filter(|(n, _)| *n > 3) { last.errors.push((who, format!("...and {} more in its log.", n - 3))) }
+    for (xl, what, at) in stale {
+        let rel = format!("archive/pc/mod/{xl}");
+        let found = roots.iter().any(|r| resolve(r, &rel).is_some());
+        if found && !gone(roots, &rel, at) {
+            last.refused.push(Refused { folder: rel.to_lowercase(), name: xl.split('.').next().unwrap_or(&xl).to_string(), version: None, why: format!(
+                "At your last launch ({}), ArchiveXL skipped its world edits in {}: the map has changed since it was made, in a game update or an update of \
+                 the mod whose area it edits. Edits that still seemed to fit may change the wrong objects, which can crash the game where they load. It needs an update.",
+                last.when, count(what.len(), "place")) });
+        } else if !found { last.errors.push(("ArchiveXL".into(), format!("{xl}'s world edits no longer fit the map in {}.", count(what.len(), "place")))) }
+    }
 
     let reports = roots.iter().find_map(|r| resolve(r, "bin/x64/plugins/AdvancedCrashReporter/reports"));
-    let newest = reports.iter().flat_map(|d| files(d)).filter_map(|p| {
+    let mut found: Vec<(String, PathBuf)> = reports.iter().flat_map(|d| files(d)).filter_map(|p| {
         let n = name(&p);
         let d: String = n.get(..15)?.chars().filter(char::is_ascii_digit).collect();
         (n.ends_with(".txt") && d.len() == 14 && d >= stamp).then_some((d, p))
-    }).max();
-    if let Some((_, p)) = newest && let Some(b) = read(&p, 4 << 20) {
+    }).collect();
+    found.sort();
+    for (_, p) in found.iter().rev() {
+        let Some(b) = read(p, 4 << 20) else { continue };
         let t = String::from_utf8_lossy(&b);
+        let hang = name(p).contains("-hang-");
+        // a "freeze" while a message box waits for the player, such as redscript's error box, is no freeze
+        if hang && t.lines().skip_while(|l| !l.starts_with("# PRIMARY STACK")).take(16).any(|l| l.contains("MessageBox")) { continue }
         let field = |k: &str| t.lines().take(40).find_map(|l| l.strip_prefix(k)?.trim_start().strip_prefix(':').map(str::trim));
         if field("Game version").is_some_and(|v| v.contains(exe)) && let Some(v) = field("Verdict").or_else(|| field("Summary")) {
-            let kind = if name(&p).contains("-hang-") { "froze" } else { "crashed" };
-            let rel = roots.iter().find_map(|r| p.strip_prefix(r).ok()).unwrap_or(&p).display().to_string();
+            let rel = roots.iter().find_map(|r| p.strip_prefix(r).ok()).unwrap_or(p).display().to_string();
             let hooks = call_path_hooks(&t);
             let also = if hooks.is_empty() { String::new() } else { format!(" Also hooked in on the call path: {}.", hooks.join(", ")) };
-            last.crash = Some((format!("Your last launch {kind}. Advanced Crash Reporter's verdict: {}.{also}", v.trim_end_matches('.')), rel));
+            last.crash = Some((format!("Your last launch {}. Advanced Crash Reporter's verdict: {}.{also}", if hang { "froze" } else { "crashed" }, v.trim_end_matches('.')), rel));
         }
+        break;
     }
     Some(last)
 }
@@ -436,7 +492,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let exe_v = vi.map(|v| show(v.0, 4));
     let roots: Vec<&Path> = mo2.iter().map(PathBuf::as_path).chain([game]).collect();
     let find = |rel: &str| roots.iter().find_map(|r| resolve(r, rel));
-    let last = exe_v.as_deref().and_then(|e| last_launch(&roots, e));
+    let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e));
 
     // For Back up and remove: every mod entry in each root. A red mod's entries are the ones its own paths point into,
     // plus (with `kin`) entries elsewhere that share its name, such as a plugin's scripts. Frameworks are never included.
@@ -515,6 +571,11 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         if fw { state.insert(&e.name, Some(status)); }
         let (remove, mo2) = if status == Red && !fw { pieces(&[&e.detect[..], &e.parts[..]].concat(), true) } else { (vec![], vec![]) };
         rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes, remove, mo2 });
+    }
+    // Advanced Crash Reporter blames the framework a crash passed through, which is often a bystander: say so when it's fine
+    if let Some((c, _)) = last.as_mut().and_then(|l| l.crash.as_mut()) && entry.is_some()
+        && let Some(f) = m.framework.iter().find(|f| c.contains(&format!("culprit: {}", f.name)) && state.get(f.name.as_str()).copied().flatten().is_some_and(|s| s != Red)) {
+        *c += &format!(" {} itself matches the list for game {b}, so a mod that uses it is the likelier cause.", f.name);
     }
     for f in &m.framework {                                  // missing frameworks matter only when something installed needs them
         let users: Vec<&str> = rows.iter().filter_map(|r| m.framework.iter().chain(&m.mods).find(|e| e.name == r.name))
@@ -751,7 +812,8 @@ mod tests {
     #[test]
     fn last_launch_logs() {
         let root = install("last", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", None),
-                                                  ("red4ext/plugins/Gone/g.dll", None), ("red4ext/plugins/Old/o.dll", None)]);
+                                                  ("red4ext/plugins/Gone/g.dll", None), ("red4ext/plugins/Old/o.dll", None),
+                                                  ("archive/pc/mod/Edits.xl", None), ("archive/pc/mod/Edits.archive", None)]);
         let logs = root.join("red4ext/logs");
         fs::create_dir_all(&logs).unwrap();
         let p = "D:\\Games\\Cyberpunk 2077\\red4ext\\plugins";
@@ -769,7 +831,10 @@ mod tests {
             [2026-11-04 03:06:07.036] [info    ] [ 1] [GlassFixNative] fine\n").unwrap();
         fs::write(logs.join("oldmod-2026-11-03-20-00-01.log"), "[x] [error] [OldMod] from an earlier launch\n").unwrap();
         let axl = (1..=4).map(|i| format!("[2026-11-04 03:10:46.000] [37264] [error] [ResourceManager] Resource {i} is missing.\n")).collect::<String>();
-        fs::write(root.join("red4ext/plugins/ArchiveXL/ArchiveXL-2026-11-04-03-10-45.log"), format!("[2026-11-04 03:10:45.789] [37264] [error] Can't patch.\n{axl}")).unwrap();
+        let world = |xl: &str, what: &str| format!("[2026-11-04 03:10:47.000] [37264] [error] [WorldStreaming] {xl}: The target {what}, but the mod expects 1383.\n");
+        let edits = [world("Edits.xl", "node #15 has type worldCookedStaticMeshNode"), world("Edits.xl", "node #15 has type worldCookedStaticMeshNode"),
+                     world("Edits.xl", "sector has 1386 node(s)"), world("Elsewhere.xl", "sector has 9 node(s)")].concat();
+        fs::write(root.join("red4ext/plugins/ArchiveXL/ArchiveXL-2026-11-04-03-10-45.log"), format!("[2026-11-04 03:10:45.789] [37264] [error] Can't patch.\n{axl}{edits}")).unwrap();
         let reports = root.join("bin/x64/plugins/AdvancedCrashReporter/reports");
         fs::create_dir_all(&reports).unwrap();
         fs::write(reports.join("20261104-030610-crash-tid1-01.txt"), "# REPORT\nGame version   : 2.5 (3.0.88.46235, built 2026-10-19)\nVerdict        : Likely culprit: ArchiveXL\n\n\
@@ -777,26 +842,33 @@ mod tests {
               RED4ext.dll                    [LOADER      ] frame #30\n  -> These intercept an engine function [further up]\n\n\
             Mods present on OTHER threads (NOT evidence):\n  audioware.dll                  [MOD-RED4EXT ] 35 threads\n").unwrap();
         fs::write(reports.join("20261103-200000-crash-tid1-01.txt"), "Game version   : 2.5 (3.0.88.46235)\nVerdict        : Likely culprit: Older\n").unwrap();
+        fs::write(reports.join("20261104-030700-hang-tid1-01.txt"), "Game version   : 2.5 (3.0.88.46235)\nVerdict        : Unknown culprit\n\n# PRIMARY STACK\n\
+            ====\nThread 1  GameThread\n     [05] 0x00007FFADCA1DE5F  USER32.dll  +0x5DE5F  (MessageBoxTimeoutW+0x18F)  [SYSTEM]\n").unwrap();   // only redscript's error box
         let r = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap();
         let l = r.last.as_ref().unwrap();
         assert_eq!(l.when, "2026-11-04 03:05");
-        assert_eq!(l.refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Old Plugin"], "a plugin no longer installed is left out");
+        assert_eq!(l.refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Old Plugin", "Edits"], "a plugin no longer installed is left out");
         let e = |w: &str, m: &str| (w.to_string(), m.to_string());
         assert_eq!(l.errors, [e("RED4ext", "The game's crash report says: Watchdog timeout! (120 seconds)"), e("GlassFixNative", "Glass Fix 1.x is still installed."),
                               e("ArchiveXL", "Can't patch."), e("ArchiveXL", "[ResourceManager] Resource 1 is missing."), e("ArchiveXL", "[ResourceManager] Resource 2 is missing."),
-                              e("ArchiveXL", "...and 2 more in its log.")]);
+                              e("ArchiveXL", "...and 2 more in its log."), e("ArchiveXL", "Elsewhere.xl's world edits no longer fit the map in 1 place.")]);
         let (c, report) = l.crash.as_ref().unwrap();
         assert!(c.contains("crashed") && c.contains("Likely culprit: ArchiveXL.") && report.ends_with("20261104-030610-crash-tid1-01.txt"), "{c} {report}");
-        assert!(c.ends_with("Also hooked in on the call path: HookMod."), "{c}");
+        assert!(c.ends_with("Also hooked in on the call path: HookMod. ArchiveXL itself matches the list for game 2.5, so a mod that uses it is the likelier cause."), "{c}");
         let old = r.rows.iter().find(|x| x.name == "Old Plugin").unwrap();
         assert!(old.status == Status::Red && old.nexus_id.is_none() && old.why.contains("last launch (2026-11-04 03:05)") && old.why.contains("an older game"));
+        let ed = r.rows.iter().find(|x| x.name == "Edits").unwrap();
+        assert!(ed.status == Status::Red && ed.why.contains("ArchiveXL skipped its world edits in 2 places"), "{}", ed.why);
+        assert_eq!(ed.remove, [("archive/pc/mod/Edits.xl".to_string(), true), ("archive/pc/mod/Edits.archive".into(), false)]);
         assert!(!r.unlisted.contains(&"Old".to_string()) && r.unlisted.contains(&"Gone".to_string()));
 
         let o = root.join("red4ext/plugins/Old/o.dll");                    // updated since that launch: no longer reported
         let log = fs::File::options().write(true).open(logs.join("red4ext-2026-11-04-03-05-54.log")).unwrap();
         log.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
         fs::write(&o, b"MZ new").unwrap();
-        assert!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().refused.is_empty());
+        assert_eq!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Edits"]);
+        fs::remove_file(reports.join("20261104-030610-crash-tid1-01.txt")).unwrap();   // the error box alone is no freeze
+        assert!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().crash.is_none());
 
         let other = install("last-other", [2, 5, 0, 0], &[]);                  // a log from another game exe is ignored
         fs::create_dir_all(other.join("red4ext/logs")).unwrap();
@@ -806,19 +878,30 @@ mod tests {
 
     #[test]
     fn redscript_errors() {
-        let root = install("redscript", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("r6/scripts/ScriptMod/a.reds", None), ("r6/scripts/Fine/f.reds", None)]);
+        let mods = ["ScriptMod", "Fine", "Addon", "Twice", "Ext"].map(|m| format!("r6/scripts/{m}/a.reds"));
+        let files: Vec<(&str, Option<[u16; 4]>)> = [("red4ext/RED4ext.dll", Some([1, 31, 0, 0]))].into_iter().chain(mods.iter().map(|m| (m.as_str(), None))).collect();
+        let root = install("redscript", [2, 5, 0, 0], &files);
         fs::create_dir_all(root.join("red4ext/logs")).unwrap();
         fs::write(root.join("red4ext/logs/red4ext-2026-11-04-03-27-39.log"), "[RED4ext] File version: 3.0.88.46235\n").unwrap();
         fs::create_dir_all(root.join("r6/logs")).unwrap();
-        let err = |m: &str, msg: &str| format!("[ERROR - Wed, 4 Nov 2026 03:28:29 -0500] [UNRESOLVED_METHOD] At D:\\Games\\Cyberpunk 2077\\r6\\scripts\\{m}\\x.reds:3:1:\n\
+        let e = |code: &str, m: &str, file: &str, msg: &str| format!("[ERROR - Wed, 4 Nov 2026 03:28:29 -0500] [{code}] At D:\\Games\\Cyberpunk 2077\\r6\\scripts\\{m}\\{file}:3:1:\n\
             @wrapMethod(X)\n^^^^^^^^^^^^^^\n{msg}\n\n");
-        let log = format!("[INFO - Wed, 4 Nov 2026 03:28:26 -0500] Compiling files in D:\\Games\\Cyberpunk 2077\\r6\\scripts:\nScriptMod\\a.reds\n{}{}{}",
-                          err("ScriptMod", "no method with this name exists on the target type"), err("ScriptMod", "another"), err("Removed", "gone since"));
+        let err = |m: &str, msg: &str| e("UNRESOLVED_METHOD", m, "x.reds", msg);
+        let log = format!("[INFO - Wed, 4 Nov 2026 03:28:26 -0500] Compiling files in D:\\Games\\Cyberpunk 2077\\r6\\scripts:\nScriptMod\\a.reds\n{}",
+            [err("ScriptMod", "no method with this name exists on the target type"), err("ScriptMod", "another"), err("Removed", "gone since"),
+             e("UNRESOLVED_IMPORT", "Addon", "a.reds", "module 'Lib.Core' has no members or does not exist"), e("UNRESOLVED_IMPORT", "Addon", "a.reds", "module 'Lib.Core.Json' has no members or does not exist"),
+             e("UNRESOLVED_REF", "Addon", "a.reds", "unresolved reference 'LibThing'"),
+             e("SYM_REDEFINITION", "Twice", "Twice.Json_1.reds", "the name of this type conflicts with a type defined at 'D:\\Games\\Cyberpunk 2077\\r6\\scripts\\Twice\\Twice.Json.reds:7:1'"),
+             e("UNRESOLVED_TYPE", "Ext", "a.reds", "unresolved type 'TagEvent'"), e("UNRESOLVED_REF", "Ext", "a.reds", "unresolved reference 'ExtConfig'"),
+             e("UNRESOLVED_REF", "Ext", "a.reds", "unresolved reference 'ExtConfig'"), e("UNRESOLVED_MEMBER", "Ext", "a.reds", "member 'changed' not found on 'IScriptable'")].concat());
         fs::write(root.join("r6/logs/redscript_rCURRENT.log"), &log).unwrap();
         let r = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap();
-        assert_eq!(r.last.as_ref().unwrap().errors, [("redscript".to_string(), "Couldn't compile 1 mod, so no script mod ran.".to_string())]);
-        let w = r.rows.iter().find(|x| x.name == "ScriptMod").unwrap();
-        assert!(w.status == Status::Red && w.nexus_id.is_none() && w.why.contains("2 errors such as \"no method with this name exists on the target type\""), "{}", w.why);
+        assert_eq!(r.last.as_ref().unwrap().errors, [("redscript".to_string(), "Couldn't compile 4 mods, so no script mod ran.".to_string())]);
+        let why = |n: &str| r.rows.iter().find(|x| x.name == n).map(|x| { assert!(x.status == Status::Red && x.nexus_id.is_none()); x.why.as_str() }).unwrap();
+        assert!(why("ScriptMod").ends_with("2 errors such as \"no method with this name exists on the target type\": it likely needs an update for this game version."), "{}", why("ScriptMod"));
+        assert!(why("Addon").contains("It builds on Lib.Core, which no installed mod provides"), "{}", why("Addon"));
+        assert!(why("Twice").contains("installed twice (Twice.Json_1.reds repeats Twice.Json.reds)"), "{}", why("Twice"));
+        assert!(why("Ext").contains("2 names that nothing installed defines, such as ExtConfig and TagEvent: a mod it needs is missing"), "{}", why("Ext"));
         assert!(!r.rows.iter().any(|x| x.name == "Removed" || x.name == "Fine"));
         fs::write(root.join("r6/logs/redscript_rCURRENT.log"), log.replace("03:28:", "02:28:")).unwrap();   // from before that launch
         assert!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().errors.is_empty());

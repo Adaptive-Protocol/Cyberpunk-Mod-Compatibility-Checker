@@ -24,7 +24,7 @@ the maintainer's curated file mapping Game builds to the Framework versions and 
 _Avoid_: update status, update manifest
 
 **Last launch**:
-The game's most recent run, as its logs record it: RED4ext's log, redscript's log, mods' own logs and Advanced Crash Reporter's reports. Its findings update after each launch.
+The game's most recent run, as its logs record it: RED4ext's log, redscript's log, mods' own logs (ArchiveXL's names the world edits it skipped) and Advanced Crash Reporter's reports. Its findings update after each launch.
 
 **Loader**:
 A file in bin/x64 that loads a **Framework**: RED4ext's winmm.dll, or the ASI loader version.dll that loads CET and .asi plugins. Listed as the Framework's `parts`.
