@@ -367,6 +367,7 @@ pub struct Last {
     pub refused: Vec<Refused>,                // plugins RED4ext refused to load
     pub errors: Vec<(String, String)>,        // (who, message) from the mods' own logs
     pub crash: Option<(String, String)>,      // (what Advanced Crash Reporter concluded, its report)
+    pub memory: Option<String>,               // memory was nearly full when the game crashed or closed
 }
 
 fn older(r: &str, exe: &str) -> &'static str { if cmp_ver(r, exe).is_lt() { "an older" } else { "a newer" } }
@@ -505,6 +506,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> 
     let mut stale: Vec<(String, Vec<String>, SystemTime)> = vec![];     // ArchiveXL world edits whose target has changed: (.xl, mismatches, log time)
     let mut leftovers: Vec<(String, String, String, SystemTime)> = vec![];   // files a mod's log says are in its way: (path, who, message, log time)
     let mut invalid: Vec<(String, usize, String, SystemTime)> = vec![];     // scripts RED4ext closed the game over: (path, errors, first, log time)
+    let mut oom = false;                                                     // the game's crash report says it ran out of memory
     for p in sources {
         let Some((owner, d)) = log_name(&name(&p)).map(|(w, d)| (w.to_string(), d)) else { continue };
         if d < stamp { continue }
@@ -525,6 +527,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> 
                 Some(t) => (owner.clone(), format!("[{t}] {msg}")),
                 None => (owner.clone(), msg),
             };
+            oom |= who == "RED4ext" && msg.starts_with("The game's crash report says: ") && msg.to_ascii_lowercase().contains("out of memory");
             // "Script validation error: Missing native global function 'X.Y' at <path>:3": a script needs native code no plugin provides
             if who == "RED4ext" && let Some((what, at_path)) = msg.strip_prefix("Script validation error: ").and_then(|m| m.rsplit_once(" at "))
                 && let Some(p) = named(roots, at_path.trim_end_matches(|c: char| c.is_ascii_digit() || c == ':')) {
@@ -584,22 +587,54 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> 
         (n.ends_with(".txt") && d.len() == 14 && d >= stamp).then_some((d, p))
     }).collect();
     found.sort();
+    let (mut mem, mut did) = (None, "");                                    // memory when the game crashed or closed, and which it did
     for (_, p) in found.iter().rev() {
         let Some(b) = read(p, 4 << 20) else { continue };
         let t = String::from_utf8_lossy(&b);
         let hang = name(p).contains("-hang-");
         // a "freeze" while a message box waits for the player, such as redscript's error box, is no freeze
         if hang && t.lines().skip_while(|l| !l.starts_with("# PRIMARY STACK")).take(16).any(|l| l.contains("MessageBox")) { continue }
-        let field = |k: &str| t.lines().take(40).find_map(|l| l.strip_prefix(k)?.trim_start().strip_prefix(':').map(str::trim));
-        if field("Game version").is_some_and(|v| v.contains(exe)) && let Some(v) = field("Verdict").or_else(|| field("Summary")) {
+        if field(&t, "Game version").is_some_and(|v| v.contains(exe)) && let Some(v) = field(&t, "Verdict").or_else(|| field(&t, "Summary")) {
             let rel = roots.iter().find_map(|r| p.strip_prefix(r).ok()).unwrap_or(p).display().to_string();
             let hooks = call_path_hooks(&t);
             let also = if hooks.is_empty() { String::new() } else { format!(" Also hooked in on the call path: {}.", hooks.join(", ")) };
-            last.crash = Some((format!("Your last launch {}. Advanced Crash Reporter's verdict: {}.{also}", if hang { "froze" } else { "crashed" }, v.trim_end_matches('.')), rel));
+            (did, mem) = (if hang { "froze" } else { "crashed" }, memory(&t));
+            let (v, nums) = (v.trim_end_matches('.'), mem.as_ref().map_or(String::new(), |(c, g, _)| format!(" ({c} committed, {g} of it by the game)")));
+            // a crash when memory ran out isn't a mod's fault, whatever the verdict says
+            last.crash = Some((if oom { format!("Your last launch {did} because the game ran out of memory{nums}: {FREE}. Advanced Crash Reporter's verdict ({v}) likely doesn't apply.") }
+                               else { format!("Your last launch {did}. Advanced Crash Reporter's verdict: {v}.{also}") }, rel));
         }
         break;
     }
+    if oom && last.crash.is_none() {
+        let rel = roots.iter().find_map(|r| log.strip_prefix(r).ok()).unwrap_or(log).display().to_string();
+        last.crash = Some((format!("Your last launch crashed because the game ran out of memory: {FREE}."), rel));
+    }
+    // no crash: the crash reporter's newest routine snapshot of this launch, from a few seconds before the game closed
+    if did.is_empty() && let Some(p) = reports.and_then(|d| files(&d.join("watch")).max_by_key(|p| changed(p))) && let Some(b) = read(&p, 4 << 20) {
+        let t = String::from_utf8_lossy(&b);
+        let at: String = field(&t, "Generated").unwrap_or("").chars().filter(char::is_ascii_digit).take(14).collect();
+        if field(&t, "Game version").is_some_and(|v| v.contains(exe)) && at.len() == 14 && at >= stamp { mem = memory(&t) }
+    }
+    if !oom && let Some((c, g, true)) = &mem {
+        let at = if did.is_empty() { "just before the game closed".to_string() } else { format!("when it {did}") };
+        last.memory = Some(format!("Memory was nearly full {at} ({c} committed, {g} of it by the game), and running out can crash the game or cut its sound: {FREE}."));
+    }
     Some(last)
+}
+
+/// What to do when memory runs out: need less of it, or let the system commit more.
+const FREE: &str = if cfg!(windows) { "close other programs, or set a larger fixed page file (32 GB, say)" } else { "close other programs, or add swap space" };
+
+/// A field from a crash report's header, such as "Verdict        : Likely culprit: X".
+fn field<'a>(report: &'a str, k: &str) -> Option<&'a str> { report.lines().take(40).find_map(|l| l.strip_prefix(k)?.trim_start().strip_prefix(':').map(str::trim)) }
+
+/// Memory at the crash, from a crash report's PC CONFIGURATION: ("47.1 GB of 47.4 GB" committed, the game's "16.3 GB", near the limit?).
+fn memory(report: &str) -> Option<(String, String, bool)> {
+    let pc = report.lines().skip_while(|l| !l.starts_with("# PC CONFIGURATION"));
+    let field = |k: &str| pc.clone().find_map(|l| l.trim_start().strip_prefix(k)?.trim_start().strip_prefix(':').map(str::trim));
+    let c = field("Commit charge")?;
+    Some((c.split(" (").next()?.to_string(), field("Game process")?.split(" committed").next()?.to_string(), c.contains("NEAR THE LIMIT")))
 }
 
 /// The mods Advanced Crash Reporter lists under "Mod hooks on the call path". They ran on the way to the crash, so one of
@@ -795,7 +830,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes, remove, mo2 });
     }
     // Advanced Crash Reporter blames the framework a crash passed through, which is often a bystander: say so when it's fine
-    if let Some((c, _)) = last.as_mut().and_then(|l| l.crash.as_mut()) && entry.is_some()
+    if let Some((c, _)) = last.as_mut().and_then(|l| l.crash.as_mut()) && entry.is_some() && !c.contains("ran out of memory")
         && let Some(f) = m.framework.iter().find(|f| c.contains(&format!("culprit: {}", f.name)) && state.get(f.name.as_str()).copied().flatten().is_some_and(|s| s != Red)) {
         *c += &format!(" {} itself matches the list for game {b}, so a mod that uses it is the likelier cause.", f.name);
     }
@@ -845,6 +880,7 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
     if let Some(l) = &r.last {
         s += &format!("Last launch: {}\n", l.when);
         if let Some((c, p)) = &l.crash { s += &format!("! {c} ({p})\n") }
+        if let Some(m) = &l.memory { s += &format!("! {m}\n") }
         for (w, m) in &l.errors { s += &format!("\terror: {w}: {m}\n") }
     }
     for x in &r.rows {
@@ -1158,6 +1194,43 @@ mod tests {
         let errors = &r.last.as_ref().unwrap().errors;
         assert_eq!(errors[0], ("RED4ext".to_string(), "Closed the game at startup: Scope.reds and Gadget need native code that no loaded plugin provides.".to_string()));
         assert!(errors.iter().any(|(_, m)| m.ends_with("at r6/scripts/Gone.reds:1")), "a script that's gone stays a log line: {errors:?}");
+    }
+
+    #[test]
+    fn ran_out_of_memory() {
+        let root = install("oom", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", None)]);
+        let logs = root.join("red4ext/logs");
+        fs::create_dir_all(&logs).unwrap();
+        let log = |m: &str| fs::write(logs.join("red4ext-2026-11-04-11-51-43.log"), format!("[2026-11-04 11:51:43.000] [info    ] [ 1] [RED4ext] File version: 3.0.88.46235\n\
+            [2026-11-04 11:57:16.724] [error   ] [ 1] [RED4ext] Crash report\n[2026-11-04 11:57:16.724] [error   ] [ 1] [RED4ext] Message: {m}\n")).unwrap();
+        log("Out of Memory! Failed to allocate 33554432 bytes with alignment 1 from pool 'PoolResource' using 'DefaultAllocator'");
+        let last = || { let l = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap(); (l.crash.map(|c| c.0), l.memory) };
+        let (c, p) = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().crash.unwrap();   // no crash reporter: RED4ext's log says it
+        assert_eq!(c, format!("Your last launch crashed because the game ran out of memory: {FREE}."));
+        assert!(p.ends_with("red4ext-2026-11-04-11-51-43.log"), "{p}");
+        let reports = root.join("bin/x64/plugins/AdvancedCrashReporter/reports");
+        fs::create_dir_all(reports.join("watch")).unwrap();
+        let report = |file: &str, at: &str, commit: &str, game: &str, near: bool| fs::write(reports.join(file), format!("Game version   : 2.5 (3.0.88.46235, built 2026-10-19)\n\
+            Generated     : 2026-11-04 {at}.040\nVerdict        : Likely culprit: ArchiveXL\n\n# PC CONFIGURATION\n====\nAt the time of this report:\n  RAM in use     : 27.5 GB of 31.8 GB (86%)\n  \
+            Commit charge  : {commit} (RAM + page file){}\n  Game process   : {game} committed, 10.1 GB in RAM (peak 10.8 GB)\n",
+            if near { "   <== NEAR THE LIMIT: past it, memory requests fail and the game crashes" } else { "" })).unwrap();
+        let crash = |commit, near| report("20261104-115718-crash-tid1-02.txt", "11:57:18", commit, "16.3 GB", near);
+        crash("47.1 GB of 47.4 GB", true);
+        assert_eq!(last(), (Some(format!("Your last launch crashed because the game ran out of memory (47.1 GB of 47.4 GB committed, 16.3 GB of it by the game): {FREE}. \
+                                          Advanced Crash Reporter's verdict (Likely culprit: ArchiveXL) likely doesn't apply.")), None), "and no note that a mod using ArchiveXL is likelier");
+        log("Watchdog timeout! (120 seconds)");                  // nearly full, but no allocation failed
+        assert_eq!(last(), (Some("Your last launch crashed. Advanced Crash Reporter's verdict: Likely culprit: ArchiveXL. \
+                                  ArchiveXL itself matches the list for game 2.5, so a mod that uses it is the likelier cause.".into()),
+                            Some(format!("Memory was nearly full when it crashed (47.1 GB of 47.4 GB committed, 16.3 GB of it by the game), \
+                                          and running out can crash the game or cut its sound: {FREE}."))));
+        crash("31.5 GB of 36.5 GB", false);
+        assert!(last().1.is_none());
+        fs::remove_file(reports.join("20261104-115718-crash-tid1-02.txt")).unwrap();   // no crash: the newest snapshot of this launch
+        report("watch/watch-06.txt", "11:50:00", "52.5 GB of 53.7 GB", "22.4 GB", true);
+        assert_eq!(last(), (None, None), "a snapshot from an earlier launch");
+        report("watch/watch-07.txt", "12:11:46", "52.5 GB of 53.7 GB", "22.4 GB", true);
+        assert_eq!(last().1.unwrap(), format!("Memory was nearly full just before the game closed (52.5 GB of 53.7 GB committed, 22.4 GB of it by the game), \
+                                               and running out can crash the game or cut its sound: {FREE}."));
     }
 
     #[test]

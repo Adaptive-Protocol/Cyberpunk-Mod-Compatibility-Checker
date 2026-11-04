@@ -107,17 +107,17 @@ impl App {
         let mut ask: Option<Vec<&check::Row>> = None;          // rows whose Remove… was pressed
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if let Some(l) = &r.last {
-                let n = l.errors.len() + usize::from(l.crash.is_some());
-                let title = format!("Your last launch, {}: {}", l.when, match (&l.crash, l.errors.len()) {
-                    (Some(_), 0) => "it crashed".to_string(),
-                    (Some(_), e) => format!("it crashed, and mods logged {}", count(e, "error")),
-                    (None, e) => format!("mods logged {}", count(e, "error")),
-                });
+                let n = l.errors.len() + usize::from(l.crash.is_some()) + usize::from(l.memory.is_some());
+                let mut what = vec![];
+                if l.crash.is_some() { what.push("it crashed".to_string()) } else if l.memory.is_some() { what.push("memory ran nearly full".into()) }
+                if !l.errors.is_empty() || what.is_empty() { what.push(format!("mods logged {}", count(l.errors.len(), "error"))) }
+                let title = format!("Your last launch, {}: {}", l.when, what.join(", and "));
                 group(ui, "last", Color32::RED, title, n, true, |ui| {
                     ui.weak(LAST_TIP);
                     if let Some((c, report)) = &l.crash {
                         ui.horizontal(|ui| { dot(ui, Color32::RED, report); ui.add(egui::Label::new(RichText::new(c).strong()).truncate().show_tooltip_when_elided(false)).on_hover_text(format!("{c}\n\nReport: {report}")) });
                     }
+                    if let Some(m) = &l.memory { ui.horizontal(|ui| { dot(ui, Color32::RED, ""); ui.add(egui::Label::new(RichText::new(m).strong()).truncate()) }); }
                     for (who, msg) in &l.errors {
                         ui.horizontal(|ui| {
                             dot(ui, Color32::RED, "");
