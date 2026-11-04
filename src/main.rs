@@ -116,13 +116,13 @@ impl App {
                 group(ui, "last", Color32::RED, title, n, true, |ui| {
                     ui.weak(LAST_TIP);
                     if let Some((c, report)) = &l.crash {
-                        ui.horizontal(|ui| { dot(ui, Color32::RED, report); ui.add(egui::Label::new(RichText::new(c).strong()).truncate()).on_hover_text(format!("{c}\n\nReport: {report}")) });
+                        ui.horizontal(|ui| { dot(ui, Color32::RED, report); ui.add(egui::Label::new(RichText::new(c).strong()).truncate().show_tooltip_when_elided(false)).on_hover_text(format!("{c}\n\nReport: {report}")) });
                     }
                     for (who, msg) in &l.errors {
                         ui.horizontal(|ui| {
                             dot(ui, Color32::RED, "");
                             cell(ui, 190.0, |ui| ui.add(egui::Label::new(RichText::new(who).strong()).truncate()));
-                            ui.add(egui::Label::new(msg).truncate()).on_hover_text(msg);
+                            ui.add(egui::Label::new(msg).truncate());          // shows the whole line on hover when cut
                         });
                     }
                 });
@@ -150,7 +150,7 @@ impl App {
                                     ui.ctx().open_url(egui::OpenUrl::new_tab(url));
                                 }
                             }
-                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(egui::Label::new(&x.why).truncate())).inner.on_hover_text(&x.why);
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(egui::Label::new(&x.why).truncate()));
                         });
                     });
                     for n in &x.notes { ui.horizontal(|ui| { ui.add_space(24.0); ui.label(format!("• {} ({}, {})", n.text, n.source, n.date)) }); }

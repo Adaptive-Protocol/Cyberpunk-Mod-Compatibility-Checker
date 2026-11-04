@@ -36,6 +36,9 @@ A known clash between files, kept in the **Compatibility manifest** and checked 
 A whole folder or file directly inside a mod folder (archive/pc/mod, r6/scripts, r6/tweaks, red4ext/plugins, CET's mods, REDmod's mods, or an .asi in bin/x64/plugins). The only thing the app may move or delete.
 _Avoid_: mod file (a mod usually has several entries)
 
+**Leftover**:
+A file the **Last launch** shows is in the way: a mod's own log calls it older, conflicting or still installed ("Conflicting older … component: <path>"), or RED4ext closed the game because the script declares native code no loaded plugin provides. Red. Remove offers it, with the same-named files beside it, only when it's a whole **Mod entry**; one inside another mod's folder is left to the player.
+
 **Companion**:
 A **Mod entry** in another mod folder with the same name as a red mod's own entry (e.g. r6/tweaks/X next to r6/scripts/X). It's offered with the mod and marked "same name".
 

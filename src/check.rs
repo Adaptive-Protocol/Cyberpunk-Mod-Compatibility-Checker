@@ -251,13 +251,15 @@ fn reds(t: &str) -> (Option<String>, Vec<String>, Vec<String>, HashSet<String>) 
     (module, imports, defs, toks.into_iter().filter(|t| word(t)).map(str::to_string).collect())
 }
 
+/// Calls `f` with every file under `d`, at most 8 folders deep. Links aren't followed.
+fn walk(d: &Path, depth: u8, f: &mut dyn FnMut(PathBuf)) {
+    for e in fs::read_dir(d).into_iter().flatten().flatten() {
+        match e.file_type() { Ok(t) if t.is_dir() && depth < 8 => walk(&e.path(), depth + 1, f), Ok(t) if t.is_file() => f(e.path()), _ => {} }
+    }
+}
+
 /// Every redscript file in each root: in r6/scripts, and in RED4ext plugin folders, which hold scripts too (Codeware's).
 fn scripts(roots: &[&Path]) -> Vec<Script> {
-    fn walk(d: &Path, depth: u8, f: &mut dyn FnMut(PathBuf)) {
-        for e in fs::read_dir(d).into_iter().flatten().flatten() {
-            match e.file_type() { Ok(t) if t.is_dir() && depth < 8 => walk(&e.path(), depth + 1, f), Ok(t) if t.is_file() => f(e.path()), _ => {} }
-        }
-    }
     let mut v = vec![];
     for (root, r) in roots.iter().enumerate() {
         for d in ["r6/scripts", "red4ext/plugins"].into_iter().filter_map(|d| resolve(r, d)) {
@@ -352,9 +354,11 @@ fn error_line(l: &str) -> Option<(Option<&str>, &str)> {
 }
 
 /// A mod the game won't run: a plugin RED4ext refused or one built for another game runtime, a script mod redscript
-/// couldn't compile, or world edits ArchiveXL skipped. `folder` is its entry, lowercase, such as "red4ext/plugins/archivexl".
+/// couldn't compile, world edits ArchiveXL skipped, a script RED4ext closed the game over, or a file a mod's log says is
+/// in its way. `folder` is its entry, lowercase, such as "red4ext/plugins/archivexl". With `near`, Remove offers only
+/// same-named entries beside it (a file left from an older version and its .xl), never the mod's parts elsewhere.
 #[derive(Clone, Debug)]
-pub struct Refused { pub folder: String, pub name: String, pub version: Option<String>, pub why: String }
+pub struct Refused { pub folder: String, pub name: String, pub version: Option<String>, pub why: String, pub near: bool }
 
 /// What the logs say about the last launch, read only when that launch ran this game exe.
 #[derive(Debug, Default)]
@@ -401,13 +405,49 @@ fn cause(errs: &[Fault]) -> String {
     else { format!("{} such as \"{}\": it likely needs an update for this game version.", count(errs.len(), "error"), errs.first().map_or("", |e| e.2)) }
 }
 
+/// Does a mod's log line say a file is in its way, such as an older copy an update left behind?
+/// ("Conflicting older X component: <path>", "X 1.x is still installed (<path>). Delete it")
+fn in_the_way(msg: &str) -> bool {
+    let w: Vec<String> = msg.to_lowercase().split(|c: char| !c.is_alphanumeric()).filter(|s| !s.is_empty()).map(str::to_string).collect();
+    w.iter().any(|x| x.starts_with("conflict") || ["older", "leftover", "outdated", "obsolete", "duplicate"].contains(&x.as_str()))
+        || w.windows(2).any(|p| matches!([p[0].as_str(), p[1].as_str()], ["still", "installed"] | ["left", "over"] | ["delete" | "remove", "it"]))
+}
+
+/// The installed file or folder in a mod folder that a log line names, from its root: "(F:\...\Cyberpunk 2077\archive\pc\mod\X.archive).
+/// Delete it" -> "archive/pc/mod/X.archive". A path can hold spaces, so trailing words are dropped until one resolves.
+fn named(roots: &[&Path], msg: &str) -> Option<String> {
+    let (m, low) = (msg.replace('\\', "/"), msg.replace('\\', "/").to_ascii_lowercase());     // same byte offsets
+    let starts: Vec<usize> = MOD_DIRS.iter().chain(&["bin/x64/plugins"]).flat_map(|d| low.match_indices(&format!("{d}/")).map(|(i, _)| i).collect::<Vec<_>>())
+        .filter(|&i| i == 0 || !low.as_bytes()[i - 1].is_ascii_alphanumeric()).collect();
+    starts.into_iter().find_map(|i| {
+        let rest = &m[i..];
+        let mut p = &rest[..rest.find(['"', '\'', '(', ')', '[', ']', ',', ';', '<', '>', '|', '*']).unwrap_or(rest.len())];
+        loop {
+            p = p.trim_end_matches(['.', ':', ' ']);
+            if unit(p).is_some() && roots.iter().any(|r| resolve(r, p).is_some()) { return Some(p.to_string()) }
+            p = &p[..p.rfind(' ')?];
+        }
+    })
+}
+
+/// Files named `file` in RED4ext plugin folders, such as a copy left there by an older version of a mod that now installs to archive/pc/mod.
+fn copies(roots: &[&Path], file: &str) -> Vec<String> {
+    let mut v = vec![];
+    for r in roots {
+        let Some(d) = resolve(r, "red4ext/plugins") else { continue };
+        walk(&d, 0, &mut |p: PathBuf| if name(&p).eq_ignore_ascii_case(file) && let Ok(x) = p.strip_prefix(r) { v.push(x.to_string_lossy().replace('\\', "/")) });
+    }
+    v
+}
+
 /// Has the mod in `folder` been removed or changed since `at`, when a log reported it?
 fn gone(roots: &[&Path], folder: &str, at: SystemTime) -> bool {
     roots.iter().find_map(|r| resolve(r, folder)).and_then(|p| changed(&p)).is_none_or(|t| t > at)
 }
 
 /// RED4ext's newest log (and redscript's, the mod logs and the crash report from the same launch), if that launch ran `exe`.
-fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
+/// `framework` tells a framework's mod entry, which a log can't make a leftover.
+fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool) -> Option<Last> {
     let logs: Vec<PathBuf> = roots.iter().filter_map(|r| resolve(r, "red4ext/logs")).flat_map(|d| files(&d)).collect();
     let (log, stamp) = logs.iter().filter_map(|p| log_name(&name(p)).filter(|(w, _)| w.eq_ignore_ascii_case("red4ext")).map(|(_, d)| (p, d)))
         .max_by(|a, b| a.1.cmp(&b.1))?;
@@ -427,7 +467,7 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
             let runtime = tail.split("runtime of the plugin is ").nth(1).map(str::trim).unwrap_or("");
             if !folder.is_empty() && !gone(roots, &folder, at) {
                 last.refused.push(Refused { folder: folder.clone(), name: name.to_string(), version: Some(version.trim_end_matches(')').to_string()),
-                    why: format!("RED4ext refused to load it at your last launch ({}): it's built for {} game version.", last.when, older(runtime, exe)) });
+                    why: format!("RED4ext refused to load it at your last launch ({}): it's built for {} game version.", last.when, older(runtime, exe)), near: false });
             }
         }
     }
@@ -452,7 +492,7 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
                 last.errors.push(("redscript".into(), format!("Couldn't compile {}, so no script mod ran.", count(failed.len(), "mod"))));
             }
             for (folder, name, errs) in failed {
-                last.refused.push(Refused { folder, name, version: None,
+                last.refused.push(Refused { folder, name, version: None, near: false,
                     why: format!("redscript couldn't compile it at your last launch ({}), which stops every script mod. {}", last.when, cause(&errs)) });
             }
         }
@@ -463,6 +503,8 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
     sources.sort_by_key(|p| (log_name(&name(p)).is_none_or(|(w, _)| !w.eq_ignore_ascii_case("red4ext")), p.clone()));   // RED4ext's own first
     let mut per: BTreeMap<String, (usize, String)> = BTreeMap::new();   // log owner -> (errors, name as shown)
     let mut stale: Vec<(String, Vec<String>, SystemTime)> = vec![];     // ArchiveXL world edits whose target has changed: (.xl, mismatches, log time)
+    let mut leftovers: Vec<(String, String, String, SystemTime)> = vec![];   // files a mod's log says are in its way: (path, who, message, log time)
+    let mut invalid: Vec<(String, usize, String, SystemTime)> = vec![];     // scripts RED4ext closed the game over: (path, errors, first, log time)
     for p in sources {
         let Some((owner, d)) = log_name(&name(&p)).map(|(w, d)| (w.to_string(), d)) else { continue };
         if d < stamp { continue }
@@ -483,6 +525,16 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
                 Some(t) => (owner.clone(), format!("[{t}] {msg}")),
                 None => (owner.clone(), msg),
             };
+            // "Script validation error: Missing native global function 'X.Y' at <path>:3": a script needs native code no plugin provides
+            if who == "RED4ext" && let Some((what, at_path)) = msg.strip_prefix("Script validation error: ").and_then(|m| m.rsplit_once(" at "))
+                && let Some(p) = named(roots, at_path.trim_end_matches(|c: char| c.is_ascii_digit() || c == ':')) {
+                match invalid.iter_mut().find(|x| x.0 == p) { Some(x) => x.1 += 1, None => invalid.push((p, 1, what.to_string(), at)) }
+                continue
+            }
+            if in_the_way(&msg) && let Some(p) = named(roots, &msg).filter(|p| !unit(p).is_some_and(|u| framework(&u))) {
+                if !leftovers.iter().any(|x| x.0 == p) { leftovers.push((p, who, msg, at)) }
+                continue
+            }
             let n = per.entry(who.to_lowercase()).or_insert((0, who.clone()));
             n.0 += 1;
             if n.0 <= 3 && last.errors.len() < 30 && !last.errors.iter().any(|(w, m)| *w == who && *m == msg) { last.errors.push((who, msg)) }
@@ -493,11 +545,36 @@ fn last_launch(roots: &[&Path], exe: &str) -> Option<Last> {
         let rel = format!("archive/pc/mod/{xl}");
         let found = roots.iter().any(|r| resolve(r, &rel).is_some());
         if found && !gone(roots, &rel, at) {
-            last.refused.push(Refused { folder: rel.to_lowercase(), name: xl.split('.').next().unwrap_or(&xl).to_string(), version: None, why: format!(
+            let others = copies(roots, &xl);
+            let also = if others.is_empty() { String::new() } else { format!(
+                " Another copy is in {}: if it's left from an older version, move it out by hand first and launch again, as it may be the one that no longer fits.", list(&others)) };
+            last.refused.push(Refused { folder: rel.to_lowercase(), name: xl.split('.').next().unwrap_or(&xl).to_string(), version: None, near: false, why: format!(
                 "At your last launch ({}), ArchiveXL skipped its world edits in {}: the map has changed since it was made, in a game update or an update of \
-                 the mod whose area it edits. Edits that still seemed to fit may change the wrong objects, which can crash the game where they load. It needs an update.",
+                 the mod whose area it edits. Edits that still seemed to fit may change the wrong objects, which can crash the game where they load. It needs an update.{also}",
                 last.when, count(what.len(), "place")) });
         } else if !found { last.errors.push(("ArchiveXL".into(), format!("{xl}'s world edits no longer fit the map in {}.", count(what.len(), "place")))) }
+    }
+
+    let mut closed = vec![];
+    for (p, n, what, _) in invalid.into_iter().filter(|x| !gone(roots, &x.0, x.3)) {
+        let (entry, file) = (unit(&p).unwrap_or_default(), p.rsplit('/').next().unwrap_or(&p));
+        let name = entry.rsplit('/').next().unwrap_or(&entry).to_string();
+        let more = if n > 1 { format!(" and {} more", n - 1) } else { String::new() };
+        let how = if entry == p { "No loaded plugin provides it, so it's likely left from an older version of a plugin: back it up and remove it." }
+            else { "The plugin it needs is missing, didn't load, or is another version: update or reinstall the mod, or back it up and remove it." };
+        closed.push(name.clone());
+        last.refused.push(Refused { folder: entry.to_lowercase(), name, version: None, near: entry == p,
+            why: format!("At your last launch ({}), RED4ext closed the game over {file}: \"{what}\"{more}. {how}", last.when) });
+    }
+    if !closed.is_empty() {
+        last.errors.insert(0, ("RED4ext".into(), format!("Closed the game at startup: {} need{} native code that no loaded plugin provides.", list(&closed), if closed.len() == 1 { "s" } else { "" })));
+    }
+    for (p, who, msg, _) in leftovers.into_iter().filter(|x| !gone(roots, &x.0, x.3)) {
+        let (entry, file) = (unit(&p).unwrap_or_default(), p.rsplit('/').next().unwrap_or(&p));
+        let owner = entry.rsplit('/').next().unwrap_or(&entry);
+        let (name, how) = if entry == p { (file.to_string(), "If it's left from an older version, back it up and remove it.".to_string()) } else { (format!("{file} (in {owner})"), format!(
+            "It's in {owner}'s folder, and Back up and remove only takes whole mods: if it's left from an older version, move {p} out by hand and keep a copy.")) };
+        last.refused.push(Refused { folder: p.to_lowercase(), name, version: None, near: true, why: format!("{who}'s log at your last launch ({}): \"{msg}\" {how}", last.when) });
     }
 
     let reports = roots.iter().find_map(|r| resolve(r, "bin/x64/plugins/AdvancedCrashReporter/reports"));
@@ -549,7 +626,7 @@ fn wrong_runtime(roots: &[&Path], exe: [u64; 4]) -> Vec<Refused> {
                 if r.is_empty() || r.contains(&exe) { continue }
                 let r = show(*r.last().unwrap(), 4);
                 out.push(Refused { folder: folder.clone(), name: name(&f), version: pe_version(dll).map(|(v, _)| show([v[0], v[1], v[2], 0], 3)),
-                    why: format!("{} is built for {} game version (exe {r}, yours is {e}), so RED4ext won't load it. It needs an update.", name(dll), older(&r, &e)) });
+                    why: format!("{} is built for {} game version (exe {r}, yours is {e}), so RED4ext won't load it. It needs an update.", name(dll), older(&r, &e)), near: false });
                 break;
             }
         }
@@ -578,6 +655,11 @@ impl Env {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status { Red, Gray, Green }
+
+/// Which same-named entries Remove offers with a mod's own: none, only files beside them in the same mod folder (an
+/// old file's .xl, not a folder holding the mod's current version), or any.
+#[derive(Clone, Copy, PartialEq)]
+enum Kin { No, Beside, Any }
 
 /// Why Remove offers an entry: the mod's own, a **Companion** (same name), or part of an add-on that builds on the
 /// named entry.
@@ -612,7 +694,6 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let exe_v = vi.map(|v| show(v.0, 4));
     let roots: Vec<&Path> = mo2.iter().map(PathBuf::as_path).chain([game]).collect();
     let find = |rel: &str| roots.iter().find_map(|r| resolve(r, rel));
-    let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e));
 
     // For Back up and remove: every mod entry in each root. A red mod's entries are the ones its own paths point into,
     // plus (with `kin`) entries elsewhere that share its name, such as a plugin's scripts. Frameworks are never included.
@@ -621,18 +702,21 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         .filter(|rel| unit(rel).as_deref() == Some(rel.as_str())).collect()).collect();
     let protect: Vec<String> = m.framework.iter().flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
     let framework = |u: &str| protect.iter().any(|p| wild(p, u));
-    let matching = |own: &[String], kin: bool| {                    // (root, entry, own?), its own first
-        let keys: Vec<String> = own.iter().map(|u| key(u)).filter(|k| !k.is_empty()).collect();
+    let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e, &framework));
+    let dir = |u: &str| u.rsplit_once('/').map_or(String::new(), |x| x.0.to_lowercase());
+    let matching = |own: &[String], kin: Kin| {                     // (root, entry, own?), its own first
+        let keys: Vec<(String, String)> = own.iter().map(|u| (key(u), dir(u))).filter(|k| !k.0.is_empty()).collect();
         let mut v: Vec<(usize, String, bool)> = entries.iter().enumerate().flat_map(|(r, list)| list.iter().map(move |u| (r, u))).filter_map(|(r, u)| {
             let mine = own.iter().any(|o| wild(o, u));
-            ((mine || kin && keys.iter().any(|k| wild(k, &key(u)))) && !framework(u)).then(|| (r, u.clone(), mine))
+            let same = kin != Kin::No && keys.iter().any(|(k, d)| wild(k, &key(u)) && (kin == Kin::Any || *d == dir(u) && roots[r].join(u).is_file()));
+            ((mine || same) && !framework(u)).then(|| (r, u.clone(), mine))
         }).collect();
         v.sort_by_key(|(_, u, mine)| (!mine, u.to_lowercase()));
         v
     };
     // ...then the add-ons whose scripts build on what it takes from the game folder (the last root), with their companions
     let (g, index) = (roots.len() - 1, OnceCell::new());
-    let pieces = |own: &[String], kin: bool| {
+    let pieces = |own: &[String], kin: Kin| {
         let own: Vec<String> = own.iter().filter_map(|p| unit(p)).collect();
         let mut found: Vec<(usize, String, Part)> = matching(&own, kin).into_iter().map(|(r, u, mine)| (r, u, if mine { Part::Own } else { Part::Kin })).collect();
         let gone: Vec<(usize, String)> = found.iter().filter(|f| f.0 == g).map(|f| (g, f.1.clone())).collect();
@@ -642,7 +726,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
             for (r, u, base) in users.into_iter().filter(|(_, u, _)| !framework(u)) {
                 let n = base.rsplit('/').next().unwrap_or(&base);
                 let by = Part::Uses(n.strip_suffix(".reds").unwrap_or(n).to_string());
-                if r == g { found.extend(matching(std::slice::from_ref(&u), true).into_iter().map(|(r, u, _)| (r, u, by.clone()))) }
+                if r == g { found.extend(matching(std::slice::from_ref(&u), Kin::Any).into_iter().map(|(r, u, _)| (r, u, by.clone()))) }
                 else { found.push((r, u, by)) }
             }
         }
@@ -707,7 +791,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
             else if let Some(n) = need(Some(Gray)) { (Gray, format!("Needs {n}, which isn't confirmed.")) }
             else { (Green, format!("OK for game {b}.")) };
         if fw { state.insert(&e.name, Some(status)); }
-        let (remove, mo2) = if status == Red && !fw { pieces(&[&e.detect[..], &e.parts[..]].concat(), true) } else { (vec![], vec![]) };
+        let (remove, mo2) = if status == Red && !fw { pieces(&[&e.detect[..], &e.parts[..]].concat(), Kin::Any) } else { (vec![], vec![]) };
         rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes, remove, mo2 });
     }
     // Advanced Crash Reporter blames the framework a crash passed through, which is often a bystander: say so when it's fine
@@ -723,13 +807,14 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
                             why: format!("Not installed, but {} need{} it.", users.join(", "), if users.len() == 1 { "s" } else { "" }) });
         }
     }
-    for r in refused.iter().filter(|r| !claimed.contains(&r.folder)) {   // unlisted plugins RED4ext won't load
-        let (remove, mo2) = pieces(std::slice::from_ref(&r.folder), true);
+    for r in refused.iter().filter(|r| !claimed.contains(&r.folder)) {   // unlisted mods the last launch shows broken
+        let whole = unit(&r.folder).as_deref() == Some(r.folder.as_str());   // a file inside a mod is left to the player
+        let (remove, mo2) = if whole { pieces(std::slice::from_ref(&r.folder), if r.near { Kin::Beside } else { Kin::Any }) } else { (vec![], vec![]) };
         rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2 });
     }
     for p in m.pattern.iter().filter(|p| p.build.as_deref().is_none_or(|pb| build.as_deref().is_some_and(|b| cmp_ver(pb, b).is_eq()))) {
         if p.all.iter().all(|x| find(x).is_some()) && !p.none.iter().any(|x| find(x).is_some()) {
-            let (remove, mo2) = pieces(&p.remove, false);
+            let (remove, mo2) = pieces(&p.remove, Kin::No);
             rows.push(Row { name: p.name.clone(), nexus_id: p.nexus_id, version: None, status: Red, notes: vec![], remove, mo2,
                             why: format!("{} ({}, {})", p.text, p.source, p.date) });
         }
@@ -952,7 +1037,11 @@ mod tests {
     fn last_launch_logs() {
         let root = install("last", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", None),
                                                   ("red4ext/plugins/Gone/g.dll", None), ("red4ext/plugins/Old/o.dll", None),
-                                                  ("archive/pc/mod/Edits.xl", None), ("archive/pc/mod/Edits.archive", None)]);
+                                                  ("archive/pc/mod/Edits.xl", None), ("archive/pc/mod/Edits.archive", None),
+                                                  ("red4ext/plugins/EditsRuntime/resources/archives/Edits.xl", None),
+                                                  ("archive/pc/mod/Garage_TEST10.archive", None), ("archive/pc/mod/Garage_TEST10.archive.xl", None),
+                                                  ("red4ext/plugins/GarageRuntime/resources/archives/Garage.archive", None),
+                                                  ("archive/pc/mod/###-Glass Fix.archive", None), ("archive/pc/mod/Old Glass.archive", None)]);
         let logs = root.join("red4ext/logs");
         fs::create_dir_all(&logs).unwrap();
         let p = "D:\\Games\\Cyberpunk 2077\\red4ext\\plugins";
@@ -967,7 +1056,17 @@ mod tests {
              [2026-11-04 03:08:04.551] [error   ] [ 1] [RED4ext] Message: Watchdog timeout! (120 seconds)\n")).unwrap();
         fs::write(logs.join("red4ext-2026-11-03-20-00-00.log"), "[RED4ext] File version: 3.0.88.46235\n").unwrap();
         fs::write(logs.join("glassfixnative-2026-11-04-03-06-07.log"), "[2026-11-04 03:06:07.036] [error   ] [ 1] [GlassFixNative] Glass Fix 1.x is still installed.\n\
-            [2026-11-04 03:06:07.036] [info    ] [ 1] [GlassFixNative] fine\n").unwrap();
+            [2026-11-04 03:06:07.036] [info    ] [ 1] [GlassFixNative] fine\n\
+            [2026-11-04 03:06:07.036] [error   ] [ 1] [GlassFixNative] Glass Fix 1.x is still installed (D:\\Games\\Cyberpunk 2077\\archive\\pc\\mod\\###-Glass Fix.archive). Delete it: it bakes glass into meshes.\n\
+            [2026-11-04 03:06:07.036] [error   ] [ 1] [GlassFixNative] An outdated copy is at archive/pc/mod/Old Glass.archive and must go.\n").unwrap();
+        // files a mod's log says are in its way: a whole mod entry, and one inside another mod's folder
+        let in_way = |w: &str, f: &str, p: &str| fs::write(logs.join(format!("{}-2026-11-04-03-06-08.log", w.to_lowercase())),
+            format!("[2026-11-04 03:06:08.384] [error   ] [ 1] [{w}] {f} disabled: Conflicting older Garage component: {p}\n")).unwrap();
+        in_way("AmbienceRuntime", "GL Ambience", "archive/pc/mod/Garage_TEST10.archive");
+        in_way("GarageRuntime", "GL Garage", "red4ext/plugins/GarageRuntime/resources/archives/Garage.archive");
+        let other = ["Conflicting older ArchiveXL: red4ext/plugins/ArchiveXL/ArchiveXL.dll", "Conflicting older component: archive/pc/mod/Missing.archive",
+                     "Can't read the folder archive/pc/mod/Garage_TEST10.archive.xl"];      // a framework, not installed, nothing in the way
+        fs::write(logs.join("otherruntime-2026-11-04-03-06-09.log"), other.map(|m| format!("[2026-11-04 03:06:09.000] [error   ] [ 1] [OtherRuntime] {m}\n")).concat()).unwrap();
         fs::write(logs.join("oldmod-2026-11-03-20-00-01.log"), "[x] [error] [OldMod] from an earlier launch\n").unwrap();
         let axl = (1..=4).map(|i| format!("[2026-11-04 03:10:46.000] [37264] [error] [ResourceManager] Resource {i} is missing.\n")).collect::<String>();
         let world = |xl: &str, what: &str| format!("[2026-11-04 03:10:47.000] [37264] [error] [WorldStreaming] {xl}: The target {what}, but the mod expects 1383.\n");
@@ -986,9 +1085,11 @@ mod tests {
         let r = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap();
         let l = r.last.as_ref().unwrap();
         assert_eq!(l.when, "2026-11-04 03:05");
-        assert_eq!(l.refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Old Plugin", "Edits"], "a plugin no longer installed is left out");
+        assert_eq!(l.refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+                   ["Old Plugin", "Edits", "Garage_TEST10.archive", "Garage.archive (in GarageRuntime)", "###-Glass Fix.archive", "Old Glass.archive"], "a plugin no longer installed is left out");
         let e = |w: &str, m: &str| (w.to_string(), m.to_string());
         assert_eq!(l.errors, [e("RED4ext", "The game's crash report says: Watchdog timeout! (120 seconds)"), e("GlassFixNative", "Glass Fix 1.x is still installed."),
+                              e("OtherRuntime", other[0]), e("OtherRuntime", other[1]), e("OtherRuntime", other[2]),
                               e("ArchiveXL", "Can't patch."), e("ArchiveXL", "[ResourceManager] Resource 1 is missing."), e("ArchiveXL", "[ResourceManager] Resource 2 is missing."),
                               e("ArchiveXL", "...and 2 more in its log."), e("ArchiveXL", "Elsewhere.xl's world edits no longer fit the map in 1 place.")]);
         let (c, report) = l.crash.as_ref().unwrap();
@@ -999,13 +1100,29 @@ mod tests {
         let ed = r.rows.iter().find(|x| x.name == "Edits").unwrap();
         assert!(ed.status == Status::Red && ed.why.contains("ArchiveXL skipped its world edits in 2 places"), "{}", ed.why);
         assert_eq!(ed.remove, [("archive/pc/mod/Edits.xl".to_string(), Part::Own), ("archive/pc/mod/Edits.archive".into(), Part::Kin)]);
+        assert!(ed.why.ends_with("Another copy is in red4ext/plugins/EditsRuntime/resources/archives/Edits.xl: if it's left from an older version, \
+                                  move it out by hand first and launch again, as it may be the one that no longer fits."), "{}", ed.why);
+        let row = |n: &str| r.rows.iter().find(|x| x.name == n).unwrap();
+        let t10 = row("Garage_TEST10.archive");
+        assert_eq!(t10.why, "AmbienceRuntime's log at your last launch (2026-11-04 03:05): \"GL Ambience disabled: Conflicting older Garage component: \
+                             archive/pc/mod/Garage_TEST10.archive\" If it's left from an older version, back it up and remove it.");
+        assert!(t10.status == Status::Red && t10.remove == [("archive/pc/mod/Garage_TEST10.archive".to_string(), Part::Own), ("archive/pc/mod/Garage_TEST10.archive.xl".into(), Part::Kin)]);
+        let inner = row("Garage.archive (in GarageRuntime)");
+        assert!(inner.status == Status::Red && inner.remove.is_empty() && inner.why.ends_with("It's in GarageRuntime's folder, and Back up and remove only takes whole mods: \
+                 if it's left from an older version, move red4ext/plugins/GarageRuntime/resources/archives/Garage.archive out by hand and keep a copy."), "{}", inner.why);
+        assert_eq!(row("###-Glass Fix.archive").remove, [("archive/pc/mod/###-Glass Fix.archive".to_string(), Part::Own)]);
+        assert!(row("Old Glass.archive").why.starts_with("GlassFixNative's log at your last launch (2026-11-04 03:05): \"An outdated copy is at archive/pc/mod/Old Glass.archive"));
         assert!(!r.unlisted.contains(&"Old".to_string()) && r.unlisted.contains(&"Gone".to_string()));
 
-        let o = root.join("red4ext/plugins/Old/o.dll");                    // updated since that launch: no longer reported
-        let log = fs::File::options().write(true).open(logs.join("red4ext-2026-11-04-03-05-54.log")).unwrap();
-        log.set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        let o = root.join("red4ext/plugins/Old/o.dll");                    // updated or removed since that launch: no longer reported
+        for l in ["red4ext-2026-11-04-03-05-54.log", "ambienceruntime-2026-11-04-03-06-08.log"] {
+            fs::File::options().write(true).open(logs.join(l)).unwrap().set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        }
         fs::write(&o, b"MZ new").unwrap();
-        assert_eq!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Edits"]);
+        fs::write(root.join("archive/pc/mod/Garage_TEST10.archive"), b"new").unwrap();
+        fs::remove_file(root.join("archive/pc/mod/Old Glass.archive")).unwrap();
+        assert_eq!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().refused.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+                   ["Edits", "Garage.archive (in GarageRuntime)", "###-Glass Fix.archive"]);
         fs::remove_file(reports.join("20261104-030610-crash-tid1-01.txt")).unwrap();   // the error box alone is no freeze
         assert!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().crash.is_none());
 
@@ -1013,6 +1130,34 @@ mod tests {
         fs::create_dir_all(other.join("red4ext/logs")).unwrap();
         fs::write(other.join("red4ext/logs/red4ext-2026-11-04-03-05-54.log"), "[RED4ext] File version: 3.0.80.51928\n").unwrap();
         assert!(scan(&Manifest::parse(LIST).unwrap(), &other, &[], &NO_ENV).unwrap().last.is_none());
+    }
+
+    #[test]
+    fn closed_over_a_script() {
+        let root = install("closed", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/Scope/Scope.dll", None), ("r6/scripts/Scope.reds", None),
+                                                    ("r6/scripts/Scope/new.reds", None), ("archive/pc/mod/Scope.xl", None),
+                                                    ("r6/scripts/Gadget/a.reds", None), ("red4ext/plugins/Gadget/g.dll", None),
+                                                    ("archive/pc/mod/Blur.archive", None), ("archive/pc/mod/Blur.archive.xl", None), ("red4ext/plugins/Blur/b.dll", None)]);
+        let logs = root.join("red4ext/logs");
+        fs::create_dir_all(&logs).unwrap();
+        let line = |m: &str| format!("[2026-11-04 11:37:24.387] [error   ] [ 1] [RED4ext] Script validation error: {m}\n");
+        let g = "F:\\Games\\Cyberpunk 2077\\r6\\scripts";
+        fs::write(logs.join("red4ext-2026-11-04-11-37-04.log"), ["[RED4ext] File version: 3.0.88.46235\n".to_string(),
+            line(&format!("Missing native global function 'Scope.Crumb' at {g}\\Scope.reds:3")), line(&format!("Missing native global function 'Scope.Trace' at {g}\\Scope.reds:5")),
+            line(&format!("Missing native class 'Gadget.Native' at {g}\\Gadget\\a.reds:12")), line("Missing native global function 'Gone.X' at r6/scripts/Gone.reds:1")].concat()).unwrap();
+        fs::write(logs.join("blur-2026-11-04-11-37-10.log"), "[2026-11-04 11:37:10.000] [error   ] [ 1] [Blur] Blur 1.x is still installed: archive/pc/mod/Blur.archive\n").unwrap();
+        let r = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap();
+        let row = |n: &str| r.rows.iter().find(|x| x.name == n).unwrap();
+        let scope = row("Scope.reds");
+        assert_eq!(scope.why, "At your last launch (2026-11-04 11:37), RED4ext closed the game over Scope.reds: \"Missing native global function 'Scope.Crumb'\" and 1 more. \
+                               No loaded plugin provides it, so it's likely left from an older version of a plugin: back it up and remove it.");
+        assert_eq!(scope.remove, [("r6/scripts/Scope.reds".to_string(), Part::Own)], "never the plugin or a folder of the same name, nor files elsewhere");
+        assert_eq!(row("Gadget").remove, [("r6/scripts/Gadget".to_string(), Part::Own), ("red4ext/plugins/Gadget".into(), Part::Kin)]);
+        assert!(row("Gadget").why.contains("over a.reds: \"Missing native class 'Gadget.Native'\". The plugin it needs is missing"), "{}", row("Gadget").why);
+        assert_eq!(row("Blur.archive").remove, [("archive/pc/mod/Blur.archive".to_string(), Part::Own), ("archive/pc/mod/Blur.archive.xl".into(), Part::Kin)]);
+        let errors = &r.last.as_ref().unwrap().errors;
+        assert_eq!(errors[0], ("RED4ext".to_string(), "Closed the game at startup: Scope.reds and Gadget need native code that no loaded plugin provides.".to_string()));
+        assert!(errors.iter().any(|(_, m)| m.ends_with("at r6/scripts/Gone.reds:1")), "a script that's gone stays a log line: {errors:?}");
     }
 
     #[test]
