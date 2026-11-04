@@ -40,7 +40,7 @@ _Avoid_: mod file (a mod usually has several entries)
 A file the **Last launch** shows is in the way: a mod's own log calls it older, conflicting or still installed ("Conflicting older … component: <path>"), or RED4ext closed the game because the script declares native code no loaded plugin provides. Red. Remove offers it, with the same-named files beside it, only when it's a whole **Mod entry**; one inside another mod's folder is left to the player.
 
 **Companion**:
-A **Mod entry** in another mod folder with the same name as a red mod's own entry (e.g. r6/tweaks/X next to r6/scripts/X). It's offered with the mod and marked "same name".
+A **Mod entry** with the same name as a red mod's own entry, in another mod folder or beside it (e.g. r6/tweaks/X next to r6/scripts/X, or X.archive next to X.xl). It's offered with the mod and marked "same name". For a **Leftover**, only files beside it count, so the mod's current version is never offered.
 
 **Add-on**:
 A mod whose scripts build on a red mod: they import a module only that mod declares, or use a class or function it defines in a module they import or add to (EquipmentEx's add-ons add to its module). Without the red mod, redscript can't compile the add-on, which stops every script mod, so Remove offers the add-on and its **Companions** with the mod, marked "builds on X". Mods that build on an add-on count too. An import under `@if(ModuleExists(..))` is optional and doesn't count.
