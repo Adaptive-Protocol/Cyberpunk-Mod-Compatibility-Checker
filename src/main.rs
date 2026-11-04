@@ -313,9 +313,13 @@ fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "
 /// A collapsible group headed by a status circle; hidden when empty.
 fn group(ui: &mut egui::Ui, id: &str, color: Color32, title: String, n: usize, open: bool, body: impl FnOnce(&mut egui::Ui)) {
     if n == 0 { return }
-    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(id), open)
-        .show_header(ui, |ui| { dot(ui, color, ""); ui.label(RichText::new(title).strong()) })
-        .body(body);
+    let mut clicked = false;                                     // the title opens and closes it too, not only the arrow
+    let mut h = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), ui.make_persistent_id(id), open).show_header(ui, |ui| {
+        dot(ui, color, "");
+        clicked = ui.add(egui::Label::new(RichText::new(title).strong()).selectable(false).sense(egui::Sense::click())).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+    });
+    if clicked { h.toggle() }
+    h.body(body);
     ui.add_space(4.0);
 }
 
