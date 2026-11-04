@@ -1,5 +1,5 @@
 //! The compatibility manifest, the install scan and the verdicts.
-//! Read-only: nothing here writes, moves or deletes a file.
+//! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use serde::Deserialize;
 use std::{cmp::Ordering, collections::BTreeMap, fs, io::Read, path::{Path, PathBuf}, time::SystemTime};
 
@@ -48,6 +48,7 @@ pub struct Pattern {
     #[serde(default)] pub none: Vec<String>,
     #[serde(default)] pub build: Option<String>,       // only on this game build
     #[serde(default)] pub nexus_id: Option<u32>,
+    #[serde(default)] pub remove: Vec<String>,         // the leftover files Back up and remove offers to take out
     pub text: String,
     pub source: String,
     pub date: String,
@@ -77,7 +78,7 @@ impl Manifest {
         }
         for p in &m.pattern {
             if p.all.is_empty() || p.nexus_id == Some(0) { return Err(format!("{}: a pattern needs paths in `all` and a real nexus_id", p.name)) }
-            if let Some(x) = p.all.iter().chain(&p.none).find(|x| !inside(x)) { return Err(outside(&p.name, x)) }
+            if let Some(x) = p.all.iter().chain(&p.none).chain(&p.remove).find(|x| !inside(x)) { return Err(outside(&p.name, x)) }
         }
         Ok(m)
     }
@@ -162,6 +163,25 @@ fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
     }
     Some(p)
 }
+
+/// Folders that hold one mod per entry (a folder, or a file such as an .archive). Back up and remove only ever moves
+/// a whole entry of one of these, so the game's own files can't be touched.
+pub const MOD_DIRS: [&str; 6] = ["bin/x64/plugins/cyber_engine_tweaks/mods", "red4ext/plugins", "r6/scripts", "r6/tweaks", "archive/pc/mod", "mods"];
+
+/// The whole mod entry `rel` points into, as written: "r6/scripts/X/a.reds" -> "r6/scripts/X". An .asi in bin/x64/plugins
+/// is an entry of its own. None outside the mod folders.
+pub fn unit(rel: &str) -> Option<String> {
+    let rel = rel.replace('\\', "/");
+    let low = rel.to_ascii_lowercase();                        // same byte offsets as `rel`
+    if let Some(f) = low.strip_prefix("bin/x64/plugins/") && !f.contains('/') && f.len() > 4 && f.ends_with(".asi") { return Some(rel) }
+    MOD_DIRS.iter().find_map(|d| {
+        let first = low.strip_prefix(d)?.strip_prefix('/')?.split('/').next().filter(|f| !f.is_empty())?;
+        Some(rel[..d.len() + 1 + first.len()].to_string())
+    })
+}
+
+/// The name a mod entry goes by, for finding its other parts: "archive/pc/mod/X.archive.xl" and "r6/scripts/X" -> "x".
+fn key(unit: &str) -> String { unit.rsplit('/').next().unwrap_or("").split('.').next().unwrap_or("").to_lowercase() }
 
 fn files(dir: &Path) -> impl Iterator<Item = PathBuf> + use<> { fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) }
 fn name(p: &Path) -> String { p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()) }
@@ -388,9 +408,14 @@ impl Env {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status { Red, Gray, Green }
 
-pub struct Row { pub name: String, pub nexus_id: Option<u32>, pub version: Option<String>, pub status: Status, pub why: String, pub notes: Vec<Note> }
+pub struct Row {
+    pub name: String, pub nexus_id: Option<u32>, pub version: Option<String>, pub status: Status, pub why: String, pub notes: Vec<Note>,
+    pub remove: Vec<(String, bool)>,    // red mods: its entries in the game folder, and whether each is its own (else same name)
+    pub mo2: Vec<String>,               // red mods: the Mod Organizer 2 mods that hold its files
+}
 
 pub struct Report {
+    pub game: PathBuf,
     pub build: Option<String>,      // e.g. "2.5"
     pub exe: Option<String>,        // the exe's file version, e.g. "3.0.88.46235"
     pub banner: Option<(bool, String)>,   // (is a warning, text); a draft list is only a notice
@@ -412,6 +437,28 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let roots: Vec<&Path> = mo2.iter().map(PathBuf::as_path).chain([game]).collect();
     let find = |rel: &str| roots.iter().find_map(|r| resolve(r, rel));
     let last = exe_v.as_deref().and_then(|e| last_launch(&roots, e));
+
+    // For Back up and remove: every mod entry in each root. A red mod's entries are the ones its own paths point into,
+    // plus (with `kin`) entries elsewhere that share its name, such as a plugin's scripts. Frameworks are never included.
+    let entries: Vec<Vec<String>> = roots.iter().map(|r| MOD_DIRS.iter().chain(&["bin/x64/plugins"]).filter_map(|d| resolve(r, d))
+        .flat_map(|d| files(&d)).filter_map(|p| p.strip_prefix(r).ok().map(|x| x.to_string_lossy().replace('\\', "/")))
+        .filter(|rel| unit(rel).as_deref() == Some(rel.as_str())).collect()).collect();
+    let protect: Vec<String> = m.framework.iter().flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
+    let pieces = |own: &[String], kin: bool| {
+        let own: Vec<String> = own.iter().filter_map(|p| unit(p)).collect();
+        let keys: Vec<String> = own.iter().map(|u| key(u)).filter(|k| !k.is_empty()).collect();
+        let (mut here, mut mo2): (Vec<(String, bool)>, Vec<String>) = (vec![], vec![]);
+        for (r, list) in roots.iter().zip(&entries) {
+            for u in list {
+                let mine = own.iter().any(|o| wild(o, u));
+                if !(mine || kin && keys.iter().any(|k| wild(k, &key(u)))) || protect.iter().any(|p| wild(p, u)) { continue }
+                if *r == game { if !here.iter().any(|(h, _)| h == u) { here.push((u.clone(), mine)) } }
+                else if !mo2.contains(&name(r)) { mo2.push(name(r)) }
+            }
+        }
+        here.sort_by_key(|(u, mine)| (!mine, u.to_lowercase()));
+        (here, mo2)
+    };
     let mut refused = vi.map_or(vec![], |v| wrong_runtime(&roots, v.0));
     for r in last.iter().flat_map(|l| &l.refused) { if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r.clone()) } }
 
@@ -466,22 +513,25 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
             else if let Some(n) = need(Some(Gray)) { (Gray, format!("Needs {n}, which isn't confirmed.")) }
             else { (Green, format!("OK for game {b}.")) };
         if fw { state.insert(&e.name, Some(status)); }
-        rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes });
+        let (remove, mo2) = if status == Red && !fw { pieces(&[&e.detect[..], &e.parts[..]].concat(), true) } else { (vec![], vec![]) };
+        rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes, remove, mo2 });
     }
     for f in &m.framework {                                  // missing frameworks matter only when something installed needs them
         let users: Vec<&str> = rows.iter().filter_map(|r| m.framework.iter().chain(&m.mods).find(|e| e.name == r.name))
             .filter(|e| e.needs.contains(&f.name)).map(|e| e.name.as_str()).collect();
         if state.get(f.name.as_str()).is_some_and(Option::is_none) && !users.is_empty() {
-            rows.push(Row { name: f.name.clone(), nexus_id: Some(f.nexus_id), version: None, status: Red, notes: vec![],
+            rows.push(Row { name: f.name.clone(), nexus_id: Some(f.nexus_id), version: None, status: Red, notes: vec![], remove: vec![], mo2: vec![],
                             why: format!("Not installed, but {} need{} it.", users.join(", "), if users.len() == 1 { "s" } else { "" }) });
         }
     }
     for r in refused.iter().filter(|r| !claimed.contains(&r.folder)) {   // unlisted plugins RED4ext won't load
-        rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![] });
+        let (remove, mo2) = pieces(std::slice::from_ref(&r.folder), true);
+        rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2 });
     }
     for p in m.pattern.iter().filter(|p| p.build.as_deref().is_none_or(|pb| build.as_deref().is_some_and(|b| cmp_ver(pb, b).is_eq()))) {
         if p.all.iter().all(|x| find(x).is_some()) && !p.none.iter().any(|x| find(x).is_some()) {
-            rows.push(Row { name: p.name.clone(), nexus_id: p.nexus_id, version: None, status: Red, notes: vec![],
+            let (remove, mo2) = pieces(&p.remove, false);
+            rows.push(Row { name: p.name.clone(), nexus_id: p.nexus_id, version: None, status: Red, notes: vec![], remove, mo2,
                             why: format!("{} ({}, {})", p.text, p.source, p.date) });
         }
     }
@@ -500,7 +550,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         && !refused.iter().any(|r| r.folder == format!("red4ext/plugins/{}", n.to_lowercase()))).collect();
     unlisted.sort_by_key(|n| n.to_lowercase());
     unlisted.dedup();
-    Ok(Report { build, exe: exe_v, banner, rows, unlisted, last })
+    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last })
 }
 
 /// Plain-text report, for `--report` and the tests.
@@ -516,6 +566,8 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
     for x in &r.rows {
         s += &format!("{:?}\t{}\t{}\t{}\t{}\n", x.status, x.name, x.version.as_deref().unwrap_or("-"), x.why, x.nexus_id.map_or("-".into(), nexus_url));
         for n in &x.notes { s += &format!("\tnote: {} ({}, {})\n", n.text, n.source, n.date) }
+        if !x.remove.is_empty() { s += &format!("\tcan remove: {}\n", x.remove.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", ")) }
+        if !x.mo2.is_empty() { s += &format!("\tin Mod Organizer 2: {}\n", x.mo2.join(", ")) }
     }
     if !r.unlisted.is_empty() { s += &format!("Unlisted native plugins: {}\n", r.unlisted.join(", ")) }
     s
@@ -772,6 +824,32 @@ mod tests {
         assert!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().errors.is_empty());
         assert_eq!(redscript_stamp("[WARN - Sat, 31 Oct 2026 23:59:01 +0100] x"), Some("20261031235901".into()));
         assert_eq!(redscript_stamp("[ERROR] no date"), None);
+    }
+
+    #[test]
+    fn what_remove_takes() {
+        let list = format!("{LIST}\n[[pattern]]\nname = \"Old leftover\"\nall = [\"archive/pc/mod/Old-*.archive\"]\nremove = [\"archive/pc/mod/Old-*.archive\"]\n\
+            text = \"t\"\nsource = \"s\"\ndate = \"d\"\n[[mod]]\nname = \"Broken\"\nnexus_id = 9\ndetect = [\"r6/scripts/Broken\"]\nneeds = [\"ArchiveXL\"]\n")
+            .replacen("needs = [\"RED4ext\"]", "needs = [\"RED4ext\"]\nmin = { \"2.5\" = \"1.28.0\" }", 1);    // ArchiveXL 1.20 is too old, so Broken is red
+        let files = [("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("r6/scripts/Broken/b.reds", None), ("r6/tweaks/broken/t.yaml", None),
+                     ("archive/pc/mod/Broken.archive", None), ("archive/pc/mod/Broken.archive.xl", None), ("archive/pc/mod/BrokenAddon.archive", None),
+                     ("bin/x64/plugins/cyber_engine_tweaks/mods/Broken/init.lua", None), ("archive/pc/mod/Old-1.0.archive", None),
+                     ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", Some([1, 20, 0, 0])), ("r6/scripts/ArchiveXL/x.reds", None)];
+        let (r, _) = run(&list, [2, 5, 0, 0], &files, "remove", &NO_ENV);
+        let of = |n: &str| r.rows.iter().find(|x| x.name == n).unwrap();
+        assert_eq!(of("Broken").remove, [("r6/scripts/Broken".to_string(), true), ("archive/pc/mod/Broken.archive".into(), false),
+            ("archive/pc/mod/Broken.archive.xl".into(), false), ("bin/x64/plugins/cyber_engine_tweaks/mods/Broken".into(), false), ("r6/tweaks/broken".into(), false)]);
+        assert!(of("ArchiveXL").status == Status::Red && of("ArchiveXL").remove.is_empty(), "a framework is never offered");
+        assert_eq!(of("Old leftover").remove, [("archive/pc/mod/Old-1.0.archive".to_string(), true)]);
+        assert_eq!(unit("bin/x64/plugins/cyber_engine_tweaks/scripts/x.lua"), None);
+        assert_eq!(unit("bin/x64/plugins/Fix.ASI").as_deref(), Some("bin/x64/plugins/Fix.ASI"));
+        assert_eq!(unit("Archive/PC/Mod/a.archive").as_deref(), Some("Archive/PC/Mod/a.archive"));
+
+        let game = install("remove-mo2-game", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", Some([1, 20, 0, 0]))]);
+        let m = install("remove-mo2-Broken Mod", [0; 4], &[("r6/scripts/Broken/b.reds", None)]);
+        let r = scan(&Manifest::parse(&list).unwrap(), &game, std::slice::from_ref(&m), &NO_ENV).unwrap();
+        let b = r.rows.iter().find(|x| x.name == "Broken").unwrap();
+        assert!(b.remove.is_empty() && b.mo2 == [m.file_name().unwrap().to_string_lossy().into_owned()], "MO2's files are left to MO2");
     }
 
     #[test]

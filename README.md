@@ -1,6 +1,6 @@
 # Cyberpunk-Mod-Compatibility-Checker
 
-Check your Cyberpunk 2077 mods before you launch. The app reads your game build and your installed frameworks (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware and others), compares them with a curated compatibility list, and flags the mods likely to break, each with a link to its Nexus page. It runs on Windows and Linux.
+Check your Cyberpunk 2077 mods before you launch. The app reads your game build, your installed frameworks (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware and others) and the logs from your last launch. It compares them with a curated compatibility list and flags the mods likely to break, each with a link to its Nexus page. If you ask, it backs up and removes a broken mod until its update arrives, or deletes it. It runs on Windows and Linux.
 
 ## Download
 
@@ -14,22 +14,33 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
 
 ## What it does and doesn't do
 
-- It **only reads** files. It never changes, moves or deletes anything in your game or mod folders, in this or any later version.
 - It **never connects to the internet**. "Open on Nexus" hands the mod's page to your own web browser, and only when you click it. Links are built from the mod's Nexus number, so they can only ever point at nexusmods.com.
-- The only file it writes is its own settings (the folders you chose and the theme). See [Removing it](#removing-it).
+- It **changes files only when you ask**, and shows every folder and file first (see [Backing up and removing a mod](#backing-up-and-removing-a-mod)). Otherwise it only reads: your mods, the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) and, on Windows, the version of the Visual C++ runtime.
+- It **never touches the game's own files or the frameworks**. It offers only whole mod folders and files in the mod folders: `archive/pc/mod`, `r6/scripts`, `r6/tweaks`, `red4ext/plugins`, Cyber Engine Tweaks' `mods`, `.asi` files in `bin/x64/plugins`, and REDmod's `mods`. Mods installed with Mod Organizer 2 are left to MO2: untick them there.
+- Apart from removals you ask for, the only file it writes is its own settings (the folders you chose and the theme). See [Removing it](#removing-it).
 
 ## Using the app
 
 1. Start it. It finds your game on its own (Steam, GOG or Epic on Windows; Steam or Heroic on Linux). If it can't, press **Browse…** and pick the folder that holds `bin`, `archive` and `r6`. You can also drop the game folder onto the exe.
 2. If you use **Mod Organizer 2**, it finds your MO2 instance and scans your enabled mods too. Pick a portable instance with the second **Browse…** (the folder that holds `ModOrganizer.ini`). **Clear** stops using MO2. Vortex and manual installs need nothing extra, since their mods sit in the game folder.
 3. Read the groups:
-   - **Red, likely to break:** a framework older than the lowest version known to work on your game build, a framework that needs an update for every game patch, a missing framework that one of your mods needs, a mod that needs a red framework, or a known problem reported for your build.
+   - **Your last launch:** what the game's logs recorded the last time it ran: a crash and the mod the crash reporter blamed (plus the other mods on the crash's call path), and the errors your mods logged. It updates after each launch.
+   - **Red, likely to break:** a framework older than the lowest version known to work on your game build, a framework that needs an update for every game patch, a missing framework that one of your mods needs, a mod that needs a red framework, or a known problem reported for your build. Also red: a RED4ext plugin built for another game version (RED4ext won't load it), a missing loader file, a Visual C++ runtime too old for a framework, a missing Wine DLL override on Linux, a script mod redscript couldn't compile at your last launch (that stops every script mod), and known clashes between files, such as an old version left next to its replacement.
    - **Gray, not confirmed:** the list doesn't cover your game build yet, or the list for your build is still a draft.
    - **Green, OK:** matches the list for your build.
    - **Unlisted native plugins:** RED4ext plugins and `.asi` files the list doesn't know. These hook the game directly and often break after a patch.
 
    Hover a circle or a reason to read it in full. A banner at the top warns when your game is newer than the list, which usually means CDPR has just released a patch.
-4. Use **Open on Nexus** or **Copy link** to get each update.
+4. Use **Open on Nexus** or **Copy link** to get each update, or **Remove…** to take a broken mod out until then.
+
+## Backing up and removing a mod
+
+Red mods have a **Remove…** button, and **Remove all…** takes every removable red mod at once. Close the game first. The window lists every folder and file the mod has in your mod folders, including ones with the same name in other mod folders (marked "same name"). Untick any you want to keep, then choose:
+
+- **Back up and remove** moves them into `_mod_backups/<date> <mod>/` in your game folder, keeping their folder paths, with a `backup.toml` that records what was moved and why. Nothing is deleted. The move stays on the same drive, and if any part fails, everything already moved is put back.
+- **Delete permanently…** asks a second time, then deletes them for good.
+
+The **Backups** window (top left) lists your backups. **Restore** puts a mod back once it's updated, and never overwrites files that have been installed again since. If you've installed the update already, **Delete…** removes the old backup for good, after showing what it holds. Windows may refuse a change, for example while the game is running or when the game is under Program Files. The app then says so, and nothing is changed.
 
 ## The compatibility list
 
@@ -45,11 +56,11 @@ The list is maintained with a Claude agent ([`.claude/agents/compat-bridge.md`](
 CyberpunkModCompatibilityChecker --report [<game folder>] [<MO2 instance folder>]
 ```
 
-prints the same verdicts as text, without opening a window.
+prints the same verdicts as text, without opening a window. It lists what **Remove…** would take, but never changes a file.
 
 ## Removing it
 
-Delete the exe. To remove its settings too, delete `%APPDATA%\Cyberpunk Mod Compatibility Checker` on Windows or `~/.local/share/cyberpunkmodcompatibilitychecker` on Linux.
+Delete the exe. To remove its settings too, delete `%APPDATA%\Cyberpunk Mod Compatibility Checker` on Windows or `~/.local/share/cyberpunkmodcompatibilitychecker` on Linux. If you backed up mods, `_mod_backups` in your game folder holds them: restore or delete them first, or delete the folder yourself.
 
 ## Verifying downloads
 
@@ -78,7 +89,7 @@ The app is written in Rust with [egui](https://github.com/emilk/egui). With [Rus
 
 ```
 cargo build --release          # binary in target/release/
-cargo test                     # verdict, list and detection tests
+cargo test                     # verdict, list, detection and backup tests
 ```
 
 Pushing a `v*` tag that matches the version in `Cargo.toml` builds the app for Windows and Linux on GitHub Actions and attaches it to a GitHub release, together with checksums, `THIRD-PARTY-NOTICES.txt` and the Nexus .7z (see `.github/workflows/build.yml`).
@@ -88,9 +99,10 @@ Pushing a `v*` tag that matches the version in `Cargo.toml` builds the app for W
 Where the app's design and code come from:
 
 - **Design:** the look follows [red4-conflicts](https://github.com/rfuzzo/Cyberpunk-utility) by [rfuzzo](https://github.com/rfuzzo), a conflict checker for Cyberpunk 2077 archive mods: the dark theme with its Light / Dark / System switch, and rows with coloured status circles. No code was copied. The verdicts, the compatibility list and the layout are this app's own.
+- **File actions:** backing a mod up instead of deleting it follows the reversible "disable" that mod managers such as Vortex and Mod Organizer 2 offer. The confirmation that lists every file, with permanent delete as a separate step, comes from the maintainer's [Nexus Mod Duplication Cleanup](https://github.com/Adaptive-Protocol/Nexus-Mod-Duplication-Cleanup).
 - **Framework knowledge:** which frameworks matter and how they depend on each other comes from the [RED Modding wiki](https://wiki.redmodding.org/cyberpunk-2077-modding/for-mod-creators-theory/core-mods-explained) and each framework's own release notes. The frameworks belong to their authors; this app only checks for them.
 - **Compatibility list:** curated by the maintainer. The first draft was seeded from the maintainer's own updated 2.5 install.
-- **Libraries:** [egui/eframe](https://github.com/emilk/egui) draws the window, [rfd](https://github.com/PolyMeilex/rfd) opens the native folder picker, and [serde](https://serde.rs) with [toml](https://github.com/toml-rs/toml) reads the list. They and their dependencies all use permissive licenses (MIT, Apache-2.0, BSD, Zlib and similar). Each release includes `THIRD-PARTY-NOTICES.txt` with their full license texts.
+- **Libraries:** [egui/eframe](https://github.com/emilk/egui) draws the window, [rfd](https://github.com/PolyMeilex/rfd) opens the native folder picker, and [serde](https://serde.rs) with [toml](https://github.com/toml-rs/toml) reads the list and writes each backup's record. They and their dependencies all use permissive licenses (MIT, Apache-2.0, BSD, Zlib and similar). Each release includes `THIRD-PARTY-NOTICES.txt` with their full license texts.
 - **AI:** the code, tests, list format, agent and documentation were written by an AI assistant (Claude, made by Anthropic) at the maintainer's direction. On Nexus Mods the app is tagged AI-Generated Content.
 
 The **About** menu in the app shows the same credits.

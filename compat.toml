@@ -12,6 +12,8 @@
 # vcredist:   lowest Microsoft Visual C++ Redistributable (x64) it runs on, checked on Windows.
 # pattern:    a known clash between files, such as an old version left next to its replacement: red when every path
 #             in `all` is installed and none in `none` is. `build` limits it to one game build. Each has text, source and date.
+#             `remove` lists the mod entries the app may offer to back up or delete for it (a folder or file directly in a
+#             mod folder); leave it out when the fix isn't a removal.
 # Paths may use * within a name, e.g. "archive/pc/mod/OldMod-*.archive".
 #
 # 2026-11-04 draft: seeded from the maintainer's updated 2.5 install. `min` values are the installed versions
