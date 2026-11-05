@@ -75,7 +75,7 @@ gh attestation verify CyberpunkModCompatibilityChecker-windows.exe -R Adaptive-P
 
 ## Code signing policy
 
-The Windows app (`CyberpunkModCompatibilityChecker-windows.exe`, shipped in the Nexus .7z as `CyberpunkModCompatibilityChecker.exe`) is signed with [Microsoft Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/). The publisher Windows shows is the developer's registered business, whose identity Microsoft validated. To check the file, open its Properties and then the Digital Signatures tab.
+Signing is being set up, so releases made before it's ready are unsigned and Windows may warn about them. From then on, the Windows app (`CyberpunkModCompatibilityChecker-windows.exe`, shipped in the Nexus .7z as `CyberpunkModCompatibilityChecker.exe`) is signed with [Microsoft Azure Artifact Signing](https://learn.microsoft.com/azure/artifact-signing/). The publisher Windows shows is the developer's registered business, whose identity Microsoft validated. To check the file, open its Properties and then the Digital Signatures tab.
 
 - Signed files are built only by this repository's GitHub Actions workflow, from the tagged source. Nothing is signed on a personal computer.
 - Each release runs in a protected `release` environment and is approved by the maintainer, [Adaptive-Protocol](https://github.com/Adaptive-Protocol), before signing.
