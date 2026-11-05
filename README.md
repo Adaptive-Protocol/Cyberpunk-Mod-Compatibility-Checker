@@ -49,7 +49,7 @@ The list is [`compat.toml`](compat.toml). It holds the game builds it covers, th
 
 Between releases, the maintainer may publish a newer `compat.toml` on the Nexus page. Put it next to the exe. The app uses it if its `updated` date is newer than the built-in list's, and tells you if it couldn't read it.
 
-The list is maintained with a Claude agent ([`.claude/agents/compat-bridge.md`](.claude/agents/compat-bridge.md)). After each game patch it reads the frameworks' release notes and the bug reports the maintainer collects from Nexus comments, and proposes an update for the maintainer to review. The agent runs on the maintainer's side and is not part of the app. A build stays a draft until the maintainer has run the game on it.
+The list is maintained with a Claude agent ([`.claude/agents/compat-bridge.md`](.claude/agents/compat-bridge.md)). After a game patch, a framework or mod update, or a bug report a player posted on Nexus, it reads the release notes or the report and proposes an update for the maintainer to review. A single report changes nothing until it's confirmed, and no reporter's name or personal details go into the repo. The agent runs on the maintainer's side and is not part of the app. A build stays a draft until the maintainer has run the game on it.
 
 ## Command line
 

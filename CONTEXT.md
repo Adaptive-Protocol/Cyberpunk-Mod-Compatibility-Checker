@@ -60,7 +60,13 @@ Moving a **Backup**'s entries back into the game folder. It's refused if any of 
 Permanently removing ticked **Mod entries** after a second confirmation, or removing a **Backup**.
 
 **Bridge agent**:
-A developer-side Claude agent the maintainer runs after a new Game build. It researches Framework support and proposes an updated Compatibility manifest. It never ships to players.
+A developer-side Claude agent the maintainer runs with one input: a new Game build, a Framework or mod update, or a pasted **Bug report**. It proposes an updated Compatibility manifest in a PR and sends the **Builder note**. It never ships to players.
+
+**Bug report**:
+A problem a player reported (usually in Nexus comments or the bugs tab), pasted to the Bridge agent by the maintainer. One report alone changes nothing players see; it waits in `bridge/reports.md` until it's confirmed.
+
+**Builder note**:
+The Bridge agent's summary for whoever builds the app: what changed in the list, what players will now see, and any finding the list can't express, which needs a new check in the app.
 
 ## Relationships
 
