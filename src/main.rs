@@ -7,7 +7,7 @@ mod remove;
 
 use check::{Manifest, Part, Report, Status};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
-use std::{env, path::{Path, PathBuf}, thread::{self, JoinHandle}, time::Duration};
+use std::{env, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
 const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
 const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), ", MIT license. \
@@ -23,6 +23,7 @@ const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO
     and the confirmation that lists every file comes from the maintainer's Nexus Mod Duplication Cleanup. \
     The verdicts, list format and layout are this app's own.\n\n\
     Built with egui/eframe, rfd, serde and toml. Their licenses are in THIRD-PARTY-NOTICES.txt.\n\n\
+    Started with --launch (from Steam's launch options), it starts the game after the check.\n\n\
     The code was written by an AI assistant (Claude, made by Anthropic) at the maintainer's direction.");
 const LAST_TIP: &str = "From the logs of the last time the game ran. They update the next time you launch it.";
 const REMOVE_TIP: &str = "Move it out of the game folder until it's updated, or delete it. You see every file first.";
@@ -51,10 +52,12 @@ struct App {
     discard: Option<PathBuf>,            // the backup waiting for "Delete for good"
     n_backups: usize,
     notice: Option<(bool, String)>,      // (succeeded, what happened) after a file action
+    launch: Option<Arc<AtomicBool>>,     // --launch: set to start the game once the window closes
+    auto: bool,                          // --launch: the first scan hasn't been judged yet
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext, start: Option<PathBuf>) -> Self {
+    fn new(cc: &eframe::CreationContext, start: Option<PathBuf>, launch: Option<Arc<AtomicBool>>) -> Self {
         cc.egui_ctx.set_theme(cc.storage.and_then(|s| eframe::get_value(s, "theme")).unwrap_or(ThemePreference::Dark));
         let (mut game, mut mo2): (String, String) = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
         if let Some(s) = start { game = s.display().to_string() }   // a folder dropped onto the exe
@@ -62,7 +65,7 @@ impl App {
         if mo2.is_empty() && let Some(m) = locate::find_mo2(Path::new(&game)) { mo2 = m.display().to_string() }
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
         let mut app = Self { game, mo2, filter: String::new(), list, source, warning, report: None, job: None, theme: None,
-                             removal: None, backups: None, discard: None, n_backups: 0, notice: None };
+                             removal: None, backups: None, discard: None, n_backups: 0, notice: None, auto: launch.is_some(), launch };
         app.rescan();
         app
     }
@@ -277,6 +280,30 @@ impl App {
         if !open { self.backups = None; self.discard = None }
     }
 
+    /// --launch: says why the game hasn't started yet, and lets the user start it anyway or not at all.
+    fn launch_bar(&mut self, ui: &mut egui::Ui) {
+        let n = match &self.report { Some(Ok(r)) => Some(reds(r)), _ => None };
+        let text = match n {
+                _ if self.job.is_some() => "Checking your mods before the game starts…".to_string(),
+                Some(0) => "Nothing is likely to break now.".into(),
+                Some(1) => "The game hasn't started: 1 mod is likely to break. Fix it below, or launch anyway.".into(),
+                Some(n) => format!("The game hasn't started: {n} mods are likely to break. Fix them below, or launch anyway."),
+                None => "The game hasn't started: your mods couldn't be checked. Choose your game folder, or launch anyway.".into(),
+        };
+        egui::Frame::new().fill(Color32::from_rgba_unmultiplied(220, 50, 50, 40)).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| {
+            ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 20.0), Layout::right_to_left(Align::Center), |ui| {   // buttons first, so a narrow window cuts the text
+                if ui.button("Don't launch").clicked() { ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close) }
+                if ui.add_enabled(self.job.is_none(), egui::Button::new(RichText::new(if n == Some(0) { "Launch the game" } else { "Launch anyway" }).strong())).clicked() { self.go(ui.ctx()) }
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(egui::Label::new(RichText::new(text).strong()).truncate()));
+            });
+        });
+    }
+
+    fn go(&self, ctx: &egui::Context) {
+        if let Some(go) = &self.launch { go.store(true, Ordering::Relaxed) }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
     fn start_page(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() * 0.3);
@@ -290,6 +317,24 @@ impl App {
 }
 
 fn exe_dir() -> Option<PathBuf> { env::current_exe().ok()?.parent().map(Path::to_path_buf) }
+
+fn reds(r: &Report) -> usize { r.rows.iter().filter(|x| x.status == Status::Red).count() }
+
+/// The game folder a launch command points into, e.g. Steam's `...\Cyberpunk 2077\REDprelauncher.exe`.
+fn game_of(cmd: &[String]) -> Option<PathBuf> {
+    cmd.iter().map(Path::new).find_map(|p| p.ancestors().find(|a| locate::is_game(a))).map(Path::to_path_buf)
+}
+
+/// Starts the game command and waits for it, so Steam sees the game running until it closes.
+fn launch(cmd: &[String]) -> ! {
+    match Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+        Ok(mut c) => std::process::exit(c.wait().ok().and_then(|s| s.code()).unwrap_or(0)),
+        Err(e) => {
+            rfd::MessageDialog::new().set_title(TITLE).set_description(format!("The game couldn't be started: {e}\n\n{}", cmd.join(" "))).show();
+            std::process::exit(1)
+        }
+    }
+}
 
 const OK: Color32 = Color32::from_rgb(40, 160, 70);
 const BAD: Color32 = Color32::from_rgb(220, 60, 60);
@@ -327,6 +372,10 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.poll();
         if self.job.is_some() { ctx.request_repaint_after(Duration::from_millis(50)) }
+        if self.auto && self.job.is_none() {                // --launch: start the game at once when nothing is red
+            self.auto = false;
+            if let Some(Ok(r)) = &self.report && reds(r) == 0 { self.go(ctx) }
+        }
         let pref = ctx.options(|o| o.theme_preference);
         if self.theme != Some(pref) {                       // keep the native title bar in step with the theme
             self.theme = Some(pref);
@@ -376,6 +425,7 @@ impl eframe::App for App {
                 if self.job.is_some() { ui.spinner(); }
             });
             if let Some(w) = &self.warning { ui.colored_label(Color32::YELLOW, w); }
+            if self.launch.is_some() { self.launch_bar(ui) }
             let mut seen = false;
             if let Some((ok, t)) = &self.notice {
                 ui.horizontal(|ui| { ui.colored_label(if *ok { OK } else { BAD }, t); seen = ui.small_button("OK").clicked() });
@@ -416,10 +466,33 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
-    let start = args.first().map(PathBuf::from).filter(|p| p.is_dir());
+    // --launch <game command>: Steam's launch options put the game's own command after it (%command%)
+    let cmd = args.first().is_some_and(|a| a == "--launch").then(|| args[1..].to_vec()).filter(|c| !c.is_empty());
+    let start = match &cmd { Some(c) => game_of(c), None => args.first().map(PathBuf::from).filter(|p| p.is_dir()) };
+    let go = cmd.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title(TITLE).with_inner_size([1100.0, 700.0]).with_min_inner_size([640.0, 400.0]),
         ..Default::default()
     };
-    eframe::run_native(TITLE, opts, Box::new(|cc| Ok(Box::new(App::new(cc, start)))))
+    let flag = go.clone();
+    eframe::run_native(TITLE, opts, Box::new(|cc| Ok(Box::new(App::new(cc, start, flag)))))?;
+    if let (Some(c), Some(go)) = (cmd, go) && go.load(Ordering::Relaxed) { launch(&c) }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_the_game_in_a_launch_command() {
+        let d = env::temp_dir().join(format!("cmcc-launch-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("bin/x64")).unwrap();
+        std::fs::write(d.join("bin/x64/Cyberpunk2077.exe"), b"").unwrap();
+        let s = |p: PathBuf| p.display().to_string();
+        assert_eq!(game_of(&[s(d.join("REDprelauncher.exe"))]), Some(d.clone()));                    // Steam's launcher
+        assert_eq!(game_of(&["proton".into(), "run".into(), s(d.join("bin/x64/Cyberpunk2077.exe"))]), Some(d.clone()));
+        assert_eq!(game_of(&[s(env::temp_dir().join("elsewhere.exe"))]), None);
+        std::fs::remove_dir_all(d).unwrap();
+    }
 }
