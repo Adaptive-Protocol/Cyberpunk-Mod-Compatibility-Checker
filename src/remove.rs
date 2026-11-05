@@ -276,6 +276,20 @@ mod tests {
         assert!(away.join("A/keep.txt").is_file() && away.join("B/b.reds").is_file(), "nothing outside was touched");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn never_through_a_junction() {
+        let (g, away) = (game("junction", &["r6/tweaks/A/t.yaml"]), game("junction-away", &["B/b.reds", "A/keep.txt"]));
+        let junction = |at: PathBuf| assert!(std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&at).arg(&away).output().unwrap().status.success());
+        junction(g.join("r6").join("scripts"));                                     // r6/scripts is a junction to a folder outside the game
+        assert!(backup(&g, "B", "", &["r6/scripts/B".into()]).unwrap_err().contains("r6/scripts in "));
+        let dir = backup(&g, "A", "", &["r6/tweaks/A".into()]).unwrap();
+        fs::remove_dir_all(dir.join("r6").join("tweaks")).unwrap();                  // a junction planted in the backup
+        junction(dir.join("r6").join("tweaks"));
+        assert!(discard(&g, &list(&g).remove(0)).unwrap_err().contains("isn't a plain folder"));
+        assert!(away.join("A/keep.txt").is_file() && away.join("B/b.reds").is_file(), "nothing outside was touched");
+    }
+
     #[test]
     fn a_failed_move_changes_nothing() {
         let g = game("rollback", &["r6/scripts/A/a.reds", "r6/tweaks/A/t.yaml"]);

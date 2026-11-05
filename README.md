@@ -16,7 +16,8 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
 
 - It **never connects to the internet**. "Open on Nexus" hands the mod's page to your own web browser, and only when you click it. Links are built from the mod's Nexus number, so they can only ever point at nexusmods.com.
 - It **changes files only when you ask**, and shows every folder and file first (see [Backing up and removing a mod](#backing-up-and-removing-a-mod)). Otherwise it only reads: your mods, the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) and, on Windows, the version of the Visual C++ runtime.
-- It **never touches the game's own files or the frameworks**. It offers only whole mod folders and files in the mod folders: `archive/pc/mod`, `r6/scripts`, `r6/tweaks`, `red4ext/plugins`, Cyber Engine Tweaks' `mods`, `.asi` files in `bin/x64/plugins`, and REDmod's `mods`. Mods installed with Mod Organizer 2 are left to MO2: untick them there.
+- It **never touches the game's own files or the frameworks**, including a framework's scripts. It offers only whole mod folders and files in the mod folders: `archive/pc/mod`, `r6/scripts`, `r6/tweaks`, `red4ext/plugins`, Cyber Engine Tweaks' `mods`, `.asi` files in `bin/x64/plugins`, and REDmod's `mods`. Mods installed with Mod Organizer 2 are left to MO2: untick them there.
+- It **never moves or deletes anything outside your game folder**. If a folder on the way to a mod, such as `r6/scripts`, is a link or junction to somewhere else, it leaves that mod to you.
 - Apart from removals you ask for, the only file it writes is its own settings (the folders you chose and the theme). See [Removing it](#removing-it).
 
 ## Using the app
