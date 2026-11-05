@@ -1,6 +1,6 @@
 # Cyberpunk-Mod-Compatibility-Checker
 
-Check your Cyberpunk 2077 mods before you launch. The app reads your game build, your installed frameworks (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware and others) and the logs from your last launch. It compares them with a curated compatibility list and flags the mods likely to break, each with a link to its Nexus page. If you ask, it backs up and removes a broken mod until its update arrives, or deletes it. It runs on Windows and Linux.
+Check your Cyberpunk 2077 mods before you launch. It tells you which mods are likely to break on your game version, with a link to each fix, and after a crash it shows what went wrong and which mod was blamed. It runs on Windows and Linux.
 
 ## Quick start
 
@@ -10,6 +10,14 @@ Check your Cyberpunk 2077 mods before you launch. The app reads your game build,
 4. **After a crash, open the app again.** "Your last launch" shows what went wrong.
 
 To have it check before every launch, see [Checking before every launch](#checking-before-every-launch).
+
+## How it works
+
+- It finds your game by itself (Steam, GOG or Epic on Windows; Steam or Heroic on Linux) and reads its version, your frameworks (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware and others), your mods, Mod Organizer 2's included, and the logs from your last launch.
+- It compares them with a curated list of the lowest framework versions that work on each game build, the mods that depend on them, and known problems. The list is updated after game patches (see [The compatibility list](#the-compatibility-list)).
+- Each framework, and each mod that depends on one, gets a verdict: red (likely to break), gray (not confirmed for your build yet) or green (OK). Each comes with the reason and **Open on Nexus** for the update.
+- If you ask, it backs up and removes a broken mod until its update arrives, then restores it. It lists every file before changing anything.
+- With one line in Steam's launch options, it checks every time you press Play. The game starts at once when nothing is red. Otherwise the app shows what's wrong and waits for you.
 
 ## Download
 
