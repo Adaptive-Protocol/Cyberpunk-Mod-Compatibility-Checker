@@ -1,0 +1,176 @@
+name: build
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write      # build provenance attestations
+  attestations: write
+  actions: read        # lets SignPath (the fallback signer) fetch the unsigned artifact
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})   # short, fixed check names for the ruleset (GitHub cuts names over 100 characters)
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            asset: CyberpunkModCompatibilityChecker-windows.exe
+            exe: CyberpunkModCompatibilityChecker.exe
+          - os: ubuntu-22.04
+            asset: CyberpunkModCompatibilityChecker-linux
+            exe: CyberpunkModCompatibilityChecker
+    runs-on: ${{ matrix.os }}
+    # Windows releases run in the "release" environment: Azure trusts only this environment, and it can require an approval
+    environment: ${{ matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/') && 'release' || '' }}
+    env:
+      # Windows releases are signed by Azure Artifact Signing once AZURE_SIGNING_ACCOUNT is set (else SignPath once SIGNPATH_ORGANIZATION_ID is set);
+      # from then on missing settings fail the release instead of shipping it unsigned
+      SIGN: ${{ matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/') && (vars.AZURE_SIGNING_ACCOUNT != '' && 'azure' || vars.SIGNPATH_ORGANIZATION_ID != '' && 'signpath') || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        if: "!startsWith(github.ref, 'refs/tags/')"   # releases build from scratch, never from a cache
+
+      - name: Tag must match the version in Cargo.toml
+        id: version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [[ "$GITHUB_REF_NAME" == "v$v" ]] || { echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $v"; exit 1; } && echo "v=$v" >> "$GITHUB_OUTPUT"
+
+      - run: cargo test --release --locked
+      - run: cargo build --release --locked
+
+      - name: No networking libraries in the build
+        run: |
+          if cargo tree --locked -e normal --prefix none --format '{p}' | grep -E '^(reqwest|ureq|hyper|curl|isahc|attohttpc|surf|tungstenite|native-tls|rustls|openssl) '; then
+            echo "::error::a networking library is part of the build"; exit 1
+          fi
+      - name: No network DLLs or VC++ runtime imported, and no admin prompt
+        if: runner.os == 'Windows'
+        run: |
+          pip install pefile==2024.8.26
+          python - "target/release/${{ matrix.exe }}" <<'PY'
+          import pefile, sys
+          for f in sys.argv[1:]:
+              pe = pefile.PE(f)
+              dlls = {e.dll.decode().lower() for e in pe.DIRECTORY_ENTRY_IMPORT}
+              print(f, "imports:", ", ".join(sorted(dlls)))
+              bad = dlls & {"ws2_32.dll", "wsock32.dll", "winhttp.dll", "wininet.dll", "urlmon.dll", "dnsapi.dll"}
+              crt = {d for d in dlls if d.startswith("vcruntime")}   # needs the VC++ Redistributable
+              if bad or crt: sys.exit(f"{f}: network DLLs imported: {sorted(bad)}" if bad else f"{f}: dynamic VC runtime imported: {sorted(crt)}")
+              res = getattr(pe, "DIRECTORY_ENTRY_RESOURCE", None)
+              manifests = [pe.get_data(l.data.struct.OffsetToData, l.data.struct.Size) for t in (res.entries if res else [])
+                           if t.id == pefile.RESOURCE_TYPE["RT_MANIFEST"] for r in t.directory.entries for l in r.directory.entries]
+              if not any(b'level="asInvoker"' in m for m in manifests): sys.exit(f"{f}: no asInvoker manifest, so Windows may ask for admin rights")
+          PY
+
+      - run: mkdir dist && mv "target/release/${{ matrix.exe }}" "dist/${{ matrix.asset }}"
+      - name: Third-party license notices (fails on a license not listed in about.toml)
+        if: runner.os == 'Linux'
+        run: |
+          cargo install cargo-about@0.9.2 --locked --features cli
+          cargo about generate --locked about.hbs -o dist/THIRD-PARTY-NOTICES.txt
+      - id: unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+      - name: Signing is configured
+        if: env.SIGN != ''
+        env:
+          READY: ${{ (env.SIGN == 'azure' && vars.AZURE_CLIENT_ID && vars.AZURE_TENANT_ID && vars.AZURE_SUBSCRIPTION_ID && vars.AZURE_SIGNING_ENDPOINT && vars.AZURE_CERT_PROFILE && 'yes') || (env.SIGN == 'signpath' && secrets.SIGNPATH_API_TOKEN && 'yes') || '' }}
+        run: '[[ "$READY" == yes ]] || { echo "::error::$SIGN signing is switched on but one of its repo variables or secrets is missing"; exit 1; }'
+
+      - if: env.SIGN == 'azure'
+        uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - if: env.SIGN == 'azure'
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_CERT_PROFILE }}
+          files: |
+            ${{ github.workspace }}\dist\${{ matrix.asset }}
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Cyberpunk Mod Compatibility Checker
+          description-url: https://github.com/Adaptive-Protocol/Cyberpunk-Mod-Compatibility-Checker
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - if: env.SIGN == 'signpath'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'Cyberpunk-Mod-Compatibility-Checker' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          parameters: |
+            version: ${{ toJSON(steps.version.outputs.v) }}   # checked against the exe's product version
+          wait-for-completion-timeout-in-seconds: 3600   # time for the manual approval
+          output-artifact-directory: signed
+      - if: env.SIGN == 'signpath'
+        run: mv "signed/${{ matrix.asset }}" "dist/${{ matrix.asset }}"
+      - name: The exe carries a valid signature
+        if: env.SIGN != ''
+        shell: pwsh
+        run: |
+          $f = "${{ matrix.asset }}"
+          $s = Get-AuthenticodeSignature "dist/$f"
+          "$f : $($s.Status) : $($s.SignerCertificate.Subject)"
+          if ($s.Status -ne 'Valid') { throw "$f is not validly signed" }
+
+      - if: startsWith(github.ref, 'refs/tags/')
+        run: cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/${{ matrix.asset }}
+      - if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+  nexus-archive:       # Nexus Mods takes uploads as archives: the released exe plus its docs in one .7z
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -p CyberpunkModCompatibilityChecker-windows.exe -p THIRD-PARTY-NOTICES.txt -D pkg
+          mv pkg/CyberpunkModCompatibilityChecker-windows.exe pkg/CyberpunkModCompatibilityChecker.exe
+          cp README.md pkg/ && cp LICENSE pkg/LICENSE.txt
+          a="CyberpunkModCompatibilityChecker-$GITHUB_REF_NAME-windows.7z"
+          (cd pkg && 7z a -t7z -mx=9 "../$a" .) && 7z t "$a"
+          sha256sum "$a" > "$a.sha256"
+          gh release upload "$GITHUB_REF_NAME" "$a" "$a.sha256" -R "$GITHUB_REPOSITORY" --clobber

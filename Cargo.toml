@@ -1,0 +1,26 @@
+[package]
+name = "cyberpunk-mod-compat-checker"
+version = "1.0.0"
+edition = "2024"
+description = "Cyberpunk Mod Compatibility Checker"
+license = "MIT"
+repository = "https://github.com/Adaptive-Protocol/Cyberpunk-Mod-Compatibility-Checker"
+publish = false
+
+[[bin]]
+name = "CyberpunkModCompatibilityChecker"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.32.3", features = ["persistence"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

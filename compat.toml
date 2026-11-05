@@ -1,0 +1,179 @@
+# Compatibility manifest, read by the app (built in, or a newer copy placed next to the exe).
+# Maintained by the bridge agent (.claude/agents/compat-bridge.md) and reviewed by the maintainer.
+#
+# build:      game builds this list covers; `game` is the product version of bin/x64/Cyberpunk2077.exe, trailing ".0"s dropped.
+#             confirmed = false until a launch test on that build passes; nothing shows green before then.
+# framework:  core mods, in dependency order (a framework may only need frameworks listed above it).
+# mod:        mods that lean heavily on frameworks or touch the engine, audio or weather.
+# detect:     paths relative to the game folder; any one present means installed; the first one is read for a version.
+# min:        lowest version known to work, per game build. build_locked: breaks on every new game build.
+# needs:      framework names. notes: known problems, each with its source and date.
+# parts:      other files it needs in order to load, such as its loader in bin/x64; red when one is missing.
+# vcredist:   lowest Microsoft Visual C++ Redistributable (x64) it runs on, checked on Windows.
+# pattern:    a known clash between files, such as an old version left next to its replacement: red when every path
+#             in `all` is installed and none in `none` is. `build` limits it to one game build. Each has text, source and date.
+#             `remove` lists the mod entries the app may offer to back up or delete for it (a folder or file directly in a
+#             mod folder); leave it out when the fix isn't a removal.
+# Paths may use * within a name, e.g. "archive/pc/mod/OldMod-*.archive".
+#
+# 2026-11-04: seeded from the maintainer's updated 2.5 install, and confirmed by a launch test on it. `min` values are the installed versions
+# (CET: the release made for 2.5; ArchiveXL: its first release for 2.5). `needs` were inferred from each archive's
+# file types and still need checking against each mod page's requirements.
+
+schema = 1
+updated = "2026-11-04"
+
+[[build]]
+game = "2.5"
+confirmed = true
+
+[[framework]]
+name = "RED4ext"
+nexus_id = 2380
+detect = ["red4ext/RED4ext.dll"]
+parts = ["bin/x64/winmm.dll"]                 # RED4ext's loader
+min = { "2.5" = "1.31.0" }
+
+[[framework]]
+name = "Cyber Engine Tweaks"
+nexus_id = 107
+detect = ["bin/x64/plugins/cyber_engine_tweaks.asi"]
+parts = ["bin/x64/version.dll"]               # the ASI loader that ships with CET
+vcredist = "14.40.33810"                      # CET wiki, troubleshooting (wiki.redmodding.org/cyber-engine-tweaks), 2026-11-04
+build_locked = true
+min = { "2.5" = "1.38.0" }
+
+[[framework]]
+name = "redscript"
+nexus_id = 1511
+detect = ["engine/tools/scc.exe"]
+
+[[framework]]
+name = "ArchiveXL"
+nexus_id = 4198
+detect = ["red4ext/plugins/ArchiveXL/ArchiveXL.dll"]
+min = { "2.5" = "1.28.0" }                    # 1.28.0, 2026-10-25: "Updated compatibility to game patch 2.5" (release notes)
+needs = ["RED4ext"]
+
+[[framework]]
+name = "TweakXL"
+nexus_id = 4197
+detect = ["red4ext/plugins/TweakXL/TweakXL.dll"]
+min = { "2.5" = "1.12.0" }
+needs = ["RED4ext"]
+
+[[framework]]
+name = "Codeware"
+nexus_id = 7780
+detect = ["red4ext/plugins/Codeware/Codeware.dll"]
+min = { "2.5" = "1.21.2" }
+needs = ["RED4ext"]
+
+[[framework]]
+name = "RedFileSystem"
+nexus_id = 13378
+detect = ["red4ext/plugins/RedFileSystem/RedFileSystem.dll"]
+needs = ["RED4ext", "redscript"]
+
+[[framework]]
+name = "Mod Settings"
+nexus_id = 4885
+detect = ["red4ext/plugins/mod_settings/mod_settings.dll"]
+min = { "2.5" = "0.2.28" }
+needs = ["RED4ext", "redscript", "ArchiveXL"]
+
+[[framework]]
+name = "Input Loader"
+nexus_id = 4575
+detect = ["red4ext/plugins/input_loader/input_loader.dll"]
+min = { "2.5" = "0.2.6" }
+needs = ["RED4ext"]
+
+[[framework]]
+name = "Native Settings UI"
+nexus_id = 3518
+detect = ["bin/x64/plugins/cyber_engine_tweaks/mods/nativeSettings"]
+needs = ["Cyber Engine Tweaks"]
+
+[[framework]]
+name = "Audioware"
+nexus_id = 12001
+detect = ["red4ext/plugins/audioware/audioware.dll"]
+needs = ["RED4ext", "redscript", "Codeware"]
+
+[[mod]]
+name = "Equipment-EX"
+nexus_id = 6945
+detect = ["r6/scripts/EquipmentEx"]
+needs = ["redscript", "ArchiveXL", "TweakXL", "Codeware"]
+
+[[mod]]
+name = "Appearance Menu Mod"
+nexus_id = 790
+detect = ["bin/x64/plugins/cyber_engine_tweaks/mods/AppearanceMenuMod"]
+needs = ["Cyber Engine Tweaks", "ArchiveXL"]
+
+[[mod]]
+name = "Virtual Atelier"
+nexus_id = 2987
+detect = ["r6/scripts/virtual-atelier-full"]
+needs = ["redscript"]
+
+[[mod]]
+name = "Cyberware-EX"
+nexus_id = 9429
+detect = ["r6/scripts/CyberwareEx"]
+needs = ["redscript"]
+
+[[mod]]
+name = "VendorsXL"
+nexus_id = 19679
+detect = ["r6/scripts/VendorsXL"]
+needs = ["redscript", "ArchiveXL", "TweakXL"]
+
+[[mod]]
+name = "Immersive First Person"
+nexus_id = 2675
+detect = ["red4ext/plugins/ImmersiveFirstPerson/ImmersiveFirstPerson.dll"]
+needs = ["RED4ext", "redscript", "Cyber Engine Tweaks"]
+
+[[mod]]
+name = "RadioExt"
+nexus_id = 4591
+detect = ["red4ext/plugins/RadioExt/RadioExt.dll"]
+needs = ["RED4ext", "Cyber Engine Tweaks"]
+
+[[mod]]
+name = "AudioXL"
+nexus_id = 33442
+detect = ["red4ext/plugins/AudioXL/AudioXL.dll"]
+needs = ["RED4ext", "redscript"]
+
+[[mod]]
+name = "Nova Rain"
+nexus_id = 13483
+detect = ["archive/pc/mod/###-NovaRain.archive"]
+
+[[mod]]
+name = "Weather Switcher"
+nexus_id = 18027
+detect = ["bin/x64/plugins/cyber_engine_tweaks/mods/WeatherSwitcher"]
+needs = ["Cyber Engine Tweaks"]
+
+[[mod]]
+name = "Cyberpunk Render Tweaks"
+nexus_id = 33943
+detect = ["red4ext/plugins/CyberpunkRenderTweaks/CyberpunkRenderTweaks.dll"]
+needs = ["RED4ext", "Cyber Engine Tweaks"]
+
+[[mod]]
+name = "ReFRACT"
+nexus_id = 34858
+detect = ["red4ext/plugins/ReFRACT/ReFRACTNative.dll"]
+needs = ["RED4ext"]
+
+[[mod]]
+name = "PhotoMode-EX"
+nexus_id = 18839
+detect = ["red4ext/plugins/PhotoModeEx/PhotoModeEx.dll"]
+needs = ["RED4ext"]
