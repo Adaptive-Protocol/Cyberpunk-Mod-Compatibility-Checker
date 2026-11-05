@@ -9,6 +9,8 @@ Check your Cyberpunk 2077 mods before you launch. The app reads your game build,
 3. **Run the game.**
 4. **After a crash, open the app again.** "Your last launch" shows what went wrong.
 
+To have it check before every launch, see [Checking before every launch](#checking-before-every-launch).
+
 ## Download
 
 Grab the latest build from the [Releases](../../releases) page. See the [Code signing policy](#code-signing-policy) for Windows signing.
@@ -25,6 +27,7 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
 - It **changes files only when you ask**, and shows every folder and file first (see [Backing up and removing a mod](#backing-up-and-removing-a-mod)). Otherwise it only reads: your mods, the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) and, on Windows, the version of the Visual C++ runtime.
 - It **never touches the game's own files or the frameworks**, including a framework's scripts. It offers only whole mod folders and files in the mod folders: `archive/pc/mod`, `r6/scripts`, `r6/tweaks`, `red4ext/plugins`, Cyber Engine Tweaks' `mods`, `.asi` files in `bin/x64/plugins`, and REDmod's `mods`. Mods installed with Mod Organizer 2 are left to MO2: untick them there.
 - It **never moves or deletes anything outside your game folder**. If a folder on the way to a mod, such as `r6/scripts`, is a link or junction to somewhere else, it leaves that mod to you.
+- It **starts the game only when you set it up to** (see [Checking before every launch](#checking-before-every-launch)), and then only the command Steam gives it.
 - Apart from removals you ask for, the only file it writes is its own settings (the folders you chose and the theme). See [Removing it](#removing-it).
 
 ## Using the app
@@ -40,6 +43,16 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
 
    Hover a circle or a reason to read it in full. A banner at the top warns when your game is newer than the list, which usually means CDPR has just released a patch.
 4. Use **Open on Nexus** or **Copy link** to get each update, or **Remove…** to take a broken mod out until then.
+
+## Checking before every launch
+
+On Steam, the app can run every time you press Play. In Steam, right-click Cyberpunk 2077, open **Properties**, and under **Launch Options** enter the path to the app followed by `--launch %command%`:
+
+```
+"C:\Tools\CyberpunkModCompatibilityChecker.exe" --launch %command%
+```
+
+From then on it checks your mods first. If nothing is red, the game starts straight away. If something is, the game waits and the app shows it, with **Launch anyway** and **Don't launch**. On Linux, use the path to `CyberpunkModCompatibilityChecker-linux` instead. To stop, clear the launch options. Mod Organizer 2 users start the game from MO2, since a Steam launch skips MO2's mods.
 
 ## Backing up and removing a mod
 
@@ -62,9 +75,10 @@ The list is maintained with a Claude agent ([`.claude/agents/compat-bridge.md`](
 
 ```
 CyberpunkModCompatibilityChecker --report [<game folder>] [<MO2 instance folder>]
+CyberpunkModCompatibilityChecker --launch <game command>
 ```
 
-prints the same verdicts as text, without opening a window. It lists what **Remove…** would take, but never changes a file.
+`--report` prints the same verdicts as text, without opening a window. It lists what **Remove…** would take, but never changes a file. `--launch` checks first and then runs the game command, as described in [Checking before every launch](#checking-before-every-launch).
 
 ## Removing it
 
