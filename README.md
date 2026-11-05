@@ -2,6 +2,13 @@
 
 Check your Cyberpunk 2077 mods before you launch. The app reads your game build, your installed frameworks (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware and others) and the logs from your last launch. It compares them with a curated compatibility list and flags the mods likely to break, each with a link to its Nexus page. If you ask, it backs up and removes a broken mod until its update arrives, or deletes it. It runs on Windows and Linux.
 
+## Quick start
+
+1. **Open the app.** It finds your game and remembers the folder from then on. If it can't, press **Browse…** and pick the folder that holds `bin`, `archive` and `r6`.
+2. **Fix what's red.** Use **Open on Nexus** to update a mod, or **Remove…** to set it aside until its update arrives.
+3. **Run the game.**
+4. **After a crash, open the app again.** "Your last launch" shows what went wrong.
+
 ## Download
 
 Grab the latest build from the [Releases](../../releases) page. See the [Code signing policy](#code-signing-policy) for Windows signing.
