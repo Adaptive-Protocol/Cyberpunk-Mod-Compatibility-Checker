@@ -4,7 +4,8 @@
 //! - Delete does the same, then deletes the backup.
 //! - Restore moves a backup back, but never over files that are there again.
 //!
-//! Only whole mod entries inside the game folder qualify (see check::unit). The game's own files never do.
+//! Only whole mod entries inside the game folder qualify (see check::unit). The game's own files never do, and
+//! nothing is moved or deleted through a link or junction to another folder.
 use crate::check::unit;
 use serde::{Deserialize, Serialize};
 use std::{fs, io, path::{Path, PathBuf}, time::SystemTime};
@@ -48,13 +49,31 @@ fn fail(e: &io::Error, p: &str) -> String {
 /// A whole mod entry, written with `/`, that can't point outside the folder it's joined to.
 fn plain(p: &str) -> bool { p.split('/').all(|s| !s.is_empty() && s != "." && s != ".." && !s.contains([':', '\\'])) && unit(p).as_deref() == Some(p) }
 
-/// `paths` under `root` after checking each is plain and exists there (or, with `fresh`, doesn't).
+/// Refuses `p` when a folder on its way down from `root` is a link, a junction or a file: a move or delete through it
+/// would happen somewhere else. A folder that isn't there yet is fine.
+fn direct(root: &Path, p: &str) -> Result<(), String> {
+    let up: Vec<&str> = p.split('/').collect();
+    for i in 1..up.len() {
+        match root.join(up[..i].join("/")).symlink_metadata() {
+            Ok(m) if m.is_dir() => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => break,
+            _ => return Err(format!("{} in {} isn't a plain folder (it may be a link or junction to elsewhere), so the app won't move or delete anything through it.",
+                                    up[..i].join("/"), root.display())),
+        }
+    }
+    Ok(())
+}
+
+/// `paths` under `root` after checking each is plain, is reached through plain folders, and exists there (or, with
+/// `fresh`, doesn't).
 fn checked(root: &Path, paths: &[String], fresh: bool) -> Result<Vec<PathBuf>, String> {
     paths.iter().map(|p| {
         if !plain(p) { return Err(format!("{p} isn't a mod folder or file this app may change.")) }
-        match (root.join(p).symlink_metadata().is_ok(), fresh) {
-            (false, false) => Err(format!("{p} wasn't found.")),
-            (true, true) => Err(format!("{p} is installed again. If that's an update, delete this backup instead.")),
+        direct(root, p)?;
+        match (root.join(p).symlink_metadata(), fresh) {
+            (Err(e), _) if e.kind() != io::ErrorKind::NotFound => Err(format!("Couldn't check {p}: {e}.")),   // not taken as absent
+            (Err(_), false) => Err(format!("{p} wasn't found.")),
+            (Ok(_), true) => Err(format!("{p} is installed again. If that's an update, delete this backup instead.")),
             _ => Ok(root.join(p)),
         }
     }).collect()
@@ -95,6 +114,7 @@ fn prune(dir: &Path) {
 /// Deletes a backup's entries (a link, not what it points to), then the backup folder. The list goes last, so a
 /// backup that couldn't be fully deleted still shows in the Backups window.
 fn erase(dir: &Path, paths: &[String]) -> Result<(), String> {
+    paths.iter().try_for_each(|p| direct(dir, p))?;                                // all checked before anything goes
     for p in paths {
         let f = dir.join(p);
         let r = match f.symlink_metadata() { Ok(m) if m.is_dir() => fs::remove_dir_all(&f), Ok(_) => fs::remove_file(&f).or_else(|_| fs::remove_dir(&f)), Err(_) => Ok(()) };
@@ -142,7 +162,7 @@ pub fn list(game: &Path) -> Vec<Backup> {
 pub fn restore(game: &Path, b: &Backup) -> Result<(), String> {
     owned(game, b)?;
     let to = checked(game, &b.paths, true)?;
-    let from = checked(&b.dir, &b.paths, false).map_err(|e| format!("The backup is incomplete: {e}"))?;
+    let from = checked(&b.dir, &b.paths, false).map_err(|e| format!("The backup can't be restored: {e}"))?;
     shift(&from, &to, &b.paths)?;
     prune(&b.dir);
     Ok(())
@@ -204,7 +224,7 @@ mod tests {
 
         let half = list(&g).remove(0);                                                // a delete that stopped halfway
         fs::remove_dir_all(half.dir.join("r6/scripts/Keep")).unwrap();
-        assert!(restore(&g, &half).unwrap_err().contains("incomplete"));
+        assert!(restore(&g, &half).unwrap_err().contains("can't be restored: r6/scripts/Keep wasn't found"));
         discard(&g, &half).unwrap();
         assert!(!g.join(DIR).exists());
     }
@@ -233,6 +253,27 @@ mod tests {
             assert!(backup(&g, "A", "", &["r6/scripts/A".to_string()]).unwrap_err().contains("isn't a plain folder") && list(&g).is_empty());
             assert!(g.join("r6/scripts/A/a.reds").is_file());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn never_through_a_link() {
+        use std::os::unix::fs::symlink;
+        let (g, away) = (game("link", &["r6/tweaks/A/t.yaml"]), game("link-away", &["B/b.reds", "A/keep.txt"]));
+        symlink(&away, g.join("r6/scripts")).unwrap();                              // r6/scripts links to a folder outside the game
+        assert!(backup(&g, "B", "", &["r6/scripts/B".into()]).unwrap_err().contains("r6/scripts in "));
+        assert!(away.join("B/b.reds").is_file() && !g.join(DIR).exists());
+
+        let dir = backup(&g, "A", "", &["r6/tweaks/A".into()]).unwrap();
+        fs::remove_dir(g.join("r6/tweaks")).unwrap();                               // then r6/tweaks is linked too
+        symlink(&away, g.join("r6/tweaks")).unwrap();
+        let b = list(&g).remove(0);
+        assert!(restore(&g, &b).unwrap_err().contains("isn't a plain folder") && dir.join("r6/tweaks/A/t.yaml").is_file());
+
+        fs::remove_dir_all(dir.join("r6/tweaks")).unwrap();                         // a link planted in the backup
+        symlink(&away, dir.join("r6/tweaks")).unwrap();
+        assert!(discard(&g, &b).unwrap_err().contains("isn't a plain folder") && restore(&g, &b).is_err());
+        assert!(away.join("A/keep.txt").is_file() && away.join("B/b.reds").is_file(), "nothing outside was touched");
     }
 
     #[test]

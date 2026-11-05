@@ -765,8 +765,10 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let entries: Vec<Vec<String>> = roots.iter().map(|r| MOD_DIRS.iter().chain(&["bin/x64/plugins"]).filter_map(|d| resolve(r, d))
         .flat_map(|d| files(&d)).filter_map(|p| p.strip_prefix(r).ok().map(|x| x.to_string_lossy().replace('\\', "/")))
         .filter(|rel| unit(rel).as_deref() == Some(rel.as_str())).collect()).collect();
-    let protect: Vec<String> = m.framework.iter().flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
-    let framework = |u: &str| protect.iter().any(|p| wild(p, u));
+    // A framework's entries, and its other entries by name (such as r6/scripts/Audioware), even when a newer list leaves it out
+    let built = Manifest::parse(BUILT_IN).ok();
+    let protect: Vec<String> = m.framework.iter().chain(built.iter().flat_map(|b| &b.framework)).flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
+    let framework = |u: &str| protect.iter().any(|p| wild(p, u) || wild(&key(p), &key(u)));
     let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e, &framework, &entries));
     let dir = |u: &str| u.rsplit_once('/').map_or(String::new(), |x| x.0.to_lowercase());
     let matching = |own: &[String], kin: Kin| {                     // (root, entry, own?), its own first
@@ -873,7 +875,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         }
     }
     for r in refused.iter().filter(|r| !claimed.contains(&r.folder)) {   // unlisted mods the last launch shows broken
-        let whole = unit(&r.folder).as_deref() == Some(r.folder.as_str());   // a file inside a mod is left to the player
+        // a file inside a mod is left to the player, and so is a name with a `*`, which would match other mods too
+        let whole = unit(&r.folder).as_deref() == Some(r.folder.as_str()) && !r.folder.contains('*');
         let (remove, mo2) = if whole { pieces(std::slice::from_ref(&r.folder), if r.near { Kin::Beside } else { Kin::Any }) } else { (vec![], vec![]) };
         rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2 });
     }
@@ -1287,6 +1290,23 @@ mod tests {
             "The crash report names misty.ent, so try without the mods named after Misty first: !!00_Misty_Goth_Redesign.archive, misty_explicit.xl \
              and MistyHair.archive (in {}).", m.file_name().unwrap().to_string_lossy()), "not one in another mod's folder");
         assert!(lead("animRig, NPCPuppet citizen__ep1_tenant_ma.ent").is_none(), "a passer-by");
+    }
+
+    #[test]
+    fn never_offers_a_framework_or_a_wildcard() {
+        let root = install("never", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", None),
+            ("r6/scripts/ArchiveXL/x.reds", None), ("red4ext/plugins/Codeware/Codeware.dll", None), ("r6/scripts/Codeware/c.reds", None), ("r6/scripts/Other/o.reds", None)]);
+        fs::create_dir_all(root.join("red4ext/logs")).unwrap();
+        fs::write(root.join("red4ext/logs/red4ext-2026-11-04-03-27-39.log"), "[RED4ext] File version: 3.0.88.46235\n").unwrap();
+        fs::create_dir_all(root.join("r6/logs")).unwrap();
+        let e = |m: &str| format!("[ERROR - Wed, 4 Nov 2026 03:28:29 -0500] [UNRESOLVED_TYPE] At D:\\Games\\Cyberpunk 2077\\r6\\scripts\\{m}\\a.reds:3:1:\n\
+            let x: T;\n^^^^^^\nunresolved type 'T'\n\n");
+        fs::write(root.join("r6/logs/redscript_rCURRENT.log"), [e("ArchiveXL"), e("Codeware"), e("*")].concat()).unwrap();
+        // LIST leaves Codeware out, as a newer list next to the app might: the built-in list still protects it
+        let r = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap();
+        for n in ["ArchiveXL", "Codeware", "*"] { assert!(r.rows.iter().any(|x| x.name == n && x.status == Status::Red), "{n}") }
+        let offered: Vec<&String> = r.rows.iter().flat_map(|x| &x.remove).map(|(p, _)| p).collect();
+        assert!(offered.is_empty(), "{offered:?}");
     }
 
     #[test]
