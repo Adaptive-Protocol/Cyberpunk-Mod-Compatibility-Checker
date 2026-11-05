@@ -42,7 +42,7 @@ A release page can show an older "Latest" than Nexus has. On 2026-11-05, RED4ext
 ## Inputs
 ### A. New game build
 1. Confirm the build number as the app reads it: the product version of `bin/x64/Cyberpunk2077.exe` with trailing `.0`s dropped (2.5.0.0 is "2.5"). Add `[[build]] game = "<build>"` with `confirmed = false`.
-2. For each `[[framework]]`, find the first release whose notes say it supports the build ("support for patch 2.6", "game version 2.6", "updated for 2.6"), and add `min."<build>" = "<version>"`. If there's none yet, leave `min` out and list it as "not updated yet". A `build_locked` framework (CET) with no release for the build also gets a note, `{ build = "<build>", text = "No release supports game <build> yet.", source = "<the release page you checked>", date }`. Without it, CET shows gray ("Matches the list") as soon as the build is listed, although it shows red while the build isn't listed (checked 2026-11-05). Step B2 removes the note once a release lands. You don't need to flag dependent mods by hand: the app shows a mod red when a framework it `needs` is red.
+2. For each `[[framework]]`, find the first release whose notes say it supports the build ("support for patch 2.6", "game version 2.6", "updated for 2.6"), and add `min."<build>" = "<version>"`. If there's none yet, leave `min` out and list it as "not updated yet". A `build_locked` framework (CET) with no release for the build also gets a note, `{ build = "<build>", text = "No release supports game <build> yet.", source = "<the release page you checked>", date }`. App v1.0.0 shows CET gray ("Matches the list") once the build is listed. Later releases show it red without the note (PR #2), but players on v1.0.0 still need the note. Step B2 removes it once a release lands. From the release after v1.0.0, a `build_locked` framework shows green on a build only when it has a `min` for that build, even when the build is confirmed. So set its `min` as soon as a release supports the build. You don't need to flag dependent mods by hand: the app shows a mod red when a framework it `needs` is red.
 3. Notes and patterns carry their own `build`, so they don't apply to the new build. Carry one over only with a source that says the problem is still there.
 
 ### B. Framework or mod update
@@ -71,7 +71,7 @@ If the maintainer shares logs, read them for version mismatches, load errors and
 - `bin/x64/plugins/AdvancedCrashReporter/reports/*.txt`, if installed: the Summary, the Verdict and "Mod hooks on the call path"
 - mod logs in `red4ext/logs` and `red4ext/plugins/<plugin>/`, and CET's `cyber_engine_tweaks.log`, `scripting.log` and `mods/<mod>/<mod>.log`
 
-Turn what you find into notes or patterns (B, C, E). Propose `confirmed = true` only if the maintainer says the game ran cleanly; they make that change.
+Turn what you find into notes or patterns (B, C, E). Propose `confirmed = true` only if the maintainer says the game ran cleanly and every `build_locked` framework has a `min` for the build; the maintainer makes that change.
 
 ### E. Patterns
 `all` holds the paths that must all be present, `none` the paths whose presence clears it, `build` the game build it applies to, then one plain sentence of `text` with `source` and `date`. Use `*` for version numbers in file names. `remove` lists mod entries (a folder or file directly in a mod folder), never a framework, its loader or a game file.
