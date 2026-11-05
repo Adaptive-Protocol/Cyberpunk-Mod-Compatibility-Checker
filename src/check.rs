@@ -850,8 +850,9 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
             else if !notes.is_empty() { (Red, format!("Known problem on game {b}.")) }
             else if let Some(n) = missing { (Red, format!("Needs {n}, which isn't installed.")) }
             else if let Some(n) = need(Some(Red)) { (Red, format!("Needs {n}, which is likely to break.")) }
-            else if entry.is_none() && e.build_locked { (Red, format!("Each release is built for one game build, and this list has none for {b} yet. Expect it to need an update.")) }
-            else if entry.is_none() { (Gray, format!("Not confirmed for game {b} yet.")) }
+            // a draft build listed before its frameworks are: build-locked ones stay red, others with a `min` elsewhere stay unconfirmed
+            else if e.build_locked && (entry.is_none() || min.is_none()) { (Red, format!("Each release is built for one game build, and this list has none for {b} yet. Expect it to need an update.")) }
+            else if entry.is_none() || (min.is_none() && !e.min.is_empty()) { (Gray, format!("Not confirmed for game {b} yet.")) }
             else if let (Some(min), Some(v)) = (min, &version) && cmp_ver(v, min).is_lt() { (Red, format!("Version {v} is older than {min}, the lowest known to work on game {b}.")) }
             else if let (Some(min), None) = (min, &version) { (Gray, format!("Its version couldn't be read. It should be {min} or newer.")) }
             else if !entry.is_some_and(|x| x.confirmed) { (Gray, format!("Matches the list for game {b}, which isn't confirmed by a launch test yet.")) }
@@ -971,6 +972,7 @@ mod tests {
         nexus_id = 107
         detect = ["bin/x64/plugins/cyber_engine_tweaks.asi"]
         build_locked = true
+        min = { "2.5" = "1.38.0" }
         [[framework]]
         name = "ArchiveXL"
         nexus_id = 4198
@@ -1032,6 +1034,23 @@ mod tests {
         let (r, v) = verdicts([2, 6, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("bin/x64/plugins/cyber_engine_tweaks.asi", Some([1, 38, 1, 0]))], "new");
         assert!(r.banner.unwrap().1.contains("newer than this compatibility list"));
         assert_eq!(v, [("CET".into(), Status::Red), ("RED4ext".into(), Status::Gray)]);
+    }
+
+    #[test]
+    fn draft_build_before_its_releases() {
+        let draft = LIST.replace(r#"build = [{ game = "2.5", confirmed = true }]"#, r#"build = [{ game = "2.5", confirmed = true }, { game = "2.6" }]"#);
+        let files = [("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("bin/x64/plugins/cyber_engine_tweaks.asi", Some([1, 38, 1, 0]))];
+        let why = |r: &Report, n: &str| r.rows.iter().find(|x| x.name == n).map(|x| (x.status, x.why.clone())).unwrap();
+        let (r, _) = run(&draft, [2, 6, 0, 0], &files, "draft", &NO_ENV);
+        assert!(r.banner.as_ref().unwrap().1.contains("draft"));
+        assert_eq!(why(&r, "CET"), (Status::Red, "Each release is built for one game build, and this list has none for 2.6 yet. Expect it to need an update.".into()));
+        assert_eq!(why(&r, "RED4ext"), (Status::Gray, "Not confirmed for game 2.6 yet.".into()));
+        let listed = draft.replace(r#"min = { "2.5" = "1.31.0" }"#, r#"min = { "2.5" = "1.31.0", "2.6" = "1.31.0" }"#);   // once a release is listed
+        let (r, _) = run(&listed, [2, 6, 0, 0], &files, "draft2", &NO_ENV);
+        assert!(why(&r, "RED4ext").1.starts_with("Matches the list for game 2.6"));
+        let unlisted = LIST.replace(r#"min = { "2.5" = "1.38.0" }"#, "");   // a confirmed build that doesn't say which CET works on it
+        let (r, _) = run(&unlisted, [2, 5, 0, 0], &files, "nomin", &NO_ENV);
+        assert_eq!(why(&r, "CET").0, Status::Red);
     }
 
     #[test]
