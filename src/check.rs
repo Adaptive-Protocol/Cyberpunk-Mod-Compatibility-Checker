@@ -745,7 +745,15 @@ pub struct Report {
     pub rows: Vec<Row>,             // sorted: red, gray, green, then by name
     pub unlisted: Vec<String>,      // native plugins the list doesn't know
     pub last: Option<Last>,         // what the logs say about the last launch
+    pub crash_reporter: bool,       // Advanced Crash Reporter is installed: without it no crash is ever seen
 }
+
+/// Advanced Crash Reporter's Nexus mod ID, for the note shown when it isn't installed.
+pub const CRASH_REPORTER: u32 = 34403;
+/// Why the app can't see a crash without Advanced Crash Reporter.
+pub const NO_CRASH_REPORTER: &str = "Crashes aren't shown: Advanced Crash Reporter isn't installed. Without it the app can't see a crash or the mod behind it, \
+and a crash at one scene or place usually comes from a mod that changes what loads there (an appearance, body or animation mod), not from one this list flags. \
+Install it, crash once more, then rescan.";
 
 /// Checks the game folder, plus any Mod Organizer 2 mod folders (each laid over the game folder), against the manifest.
 pub fn check(m: &Manifest, game: &Path, mo2: &[PathBuf]) -> Result<Report, String> { scan(m, game, mo2, &Env::of(game)) }
@@ -903,7 +911,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         && !refused.iter().any(|r| r.folder == format!("red4ext/plugins/{}", n.to_lowercase()))).collect();
     unlisted.sort_by_key(|n| n.to_lowercase());
     unlisted.dedup();
-    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last })
+    let crash_reporter = ["bin/x64/plugins/AdvancedCrashReporter.asi", "bin/x64/plugins/AdvancedCrashReporter"].iter().any(|p| find(p).is_some());
+    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter })
 }
 
 /// Plain-text report, for `--report` and the tests.
@@ -911,6 +920,7 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
     let mut s = format!("Game build {} (exe {}). Compatibility list {updated}, {source}.\n",
                         r.build.as_deref().unwrap_or("unknown"), r.exe.as_deref().unwrap_or("unknown"));
     if let Some((_, b)) = &r.banner { s += &format!("! {b}\n") }
+    if !r.crash_reporter { s += &format!("{NO_CRASH_REPORTER} {}\n", nexus_url(CRASH_REPORTER)) }
     if let Some(l) = &r.last {
         s += &format!("Last launch: {}\n", l.when);
         if let Some((c, p)) = &l.crash { s += &format!("! {c} ({p})\n") }
@@ -1009,6 +1019,14 @@ mod tests {
 
     #[test]
     fn built_in_list_is_valid() { Manifest::parse(BUILT_IN).unwrap(); }
+
+    #[test]
+    fn says_when_crashes_cant_be_seen() {
+        let (r, _) = verdicts([2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0]))], "no-acr");
+        assert!(!r.crash_reporter && text(&r, "", "").contains("Crashes aren't shown") && text(&r, "", "").contains("/mods/34403"));
+        let (r, _) = verdicts([2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("bin/x64/plugins/AdvancedCrashReporter.asi", None)], "acr");
+        assert!(r.crash_reporter && !text(&r, "", "").contains("Crashes aren't shown"));
+    }
 
     #[test]
     fn confirmed_build() {
