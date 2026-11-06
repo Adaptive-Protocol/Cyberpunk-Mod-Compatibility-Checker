@@ -68,7 +68,7 @@ It doesn't list every mod you have, only the ones most likely to break after a p
 - **Archive mods** (`archive/pc/mod`): when ArchiveXL skipped the mod's world edits at your last launch.
 - **Script mods** (`r6/scripts`): when redscript couldn't compile the mod, or RED4ext closed the game over one of its scripts.
 - **TweakXL, CET and REDmod mods** (`r6/tweaks`, CET's `mods`, `mods`): no check of their own yet. Errors that TweakXL, ArchiveXL and other RED4ext plugins log appear under **Your last launch**. CET's logs aren't read.
-- **Any of these** also turn red when a mod's log at your last launch calls the file older, conflicting or still installed, or when the list knows a clash between its files. **Your last launch** can also name any mod as the crash's culprit or on its call path.
+- **Any of these** also turn red when a mod's log at your last launch calls the file older, conflicting or still installed, or when the list knows a clash between its files. With Advanced Crash Reporter installed, **Your last launch** can also name any mod as the crash's culprit or on its call path.
 
 **Gray** on a listed mod means the list doesn't cover your game build, is still a draft for it, couldn't read the mod's version, or the mod needs a framework that's gray. The green **OK** group starts collapsed: click its title to open it.
 
