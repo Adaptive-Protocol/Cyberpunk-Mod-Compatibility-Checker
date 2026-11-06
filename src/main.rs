@@ -109,6 +109,17 @@ impl App {
         let unlisted: Vec<_> = r.unlisted.iter().filter(|n| n.to_lowercase().contains(&q)).collect();
         let mut ask: Option<Vec<&check::Row>> = None;          // rows whose Remove… was pressed
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            if !r.crash_reporter {
+                ui.horizontal(|ui| {
+                    dot(ui, Color32::GRAY, check::NO_CRASH_REPORTER);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let url = check::nexus_url(check::CRASH_REPORTER);
+                        if ui.small_button("Open on Nexus").on_hover_text("Opens Advanced Crash Reporter's page in your web browser").clicked() { ui.ctx().open_url(egui::OpenUrl::new_tab(url)) }
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(egui::Label::new(check::NO_CRASH_REPORTER).truncate()));
+                    });
+                });
+                ui.add_space(4.0);
+            }
             if let Some(l) = &r.last {
                 let n = l.errors.len() + [l.crash.is_some(), l.memory.is_some(), l.lead.is_some()].into_iter().filter(|&x| x).count();
                 let mut what = vec![];

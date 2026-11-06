@@ -50,6 +50,7 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
    - **Gray, not confirmed:** the list doesn't cover your game build yet, or the list for your build is still a draft.
    - **Green, OK:** matches the list for your build.
    - **Unlisted native plugins:** RED4ext plugins and `.asi` files the list doesn't know. These hook the game directly and often break after a patch.
+   - **Crashes aren't shown** (gray, at the top): [Advanced Crash Reporter](https://www.nexusmods.com/cyberpunk2077/mods/34403) isn't installed. The app reads crashes only from its reports, so without it a crash leaves no trace here. Removing the red mods fixes what a game patch broke; a crash at one scene or place usually comes from a mod that changes what loads there (an appearance, body or animation mod), which only a crash report can point to.
 
    Hover a circle or a reason to read it in full. A banner at the top warns when your game is newer than the list, which usually means CDPR has just released a patch.
 4. Use **Open on Nexus** or **Copy link** to get each update, or **Remove…** to take a broken mod out until then.
