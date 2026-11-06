@@ -92,7 +92,7 @@ fn shift(from: &[PathBuf], to: &[PathBuf], names: &[String]) -> Result<(), Strin
 }
 
 /// `<game>/_mod_backups`, unless it's a link or junction to somewhere else.
-fn home(game: &Path) -> Result<PathBuf, String> {
+pub fn home(game: &Path) -> Result<PathBuf, String> {
     let d = game.join(DIR);
     match d.symlink_metadata() { Ok(m) if !m.is_dir() => Err(format!("{} isn't a plain folder, so the app won't use it.", d.display())), _ => Ok(d) }
 }
