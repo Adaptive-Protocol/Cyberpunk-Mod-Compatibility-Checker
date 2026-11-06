@@ -10,7 +10,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
 use std::{env, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
 const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
-const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), ", MIT license. \
+const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), " by FauxNoodles on Nexus Mods, MIT license. \
     It never connects to the internet: \"Open on Nexus\" hands the mod's page to your own web browser. \
     It changes files only when you ask: Back up and remove moves a broken mod into _mod_backups in your game folder, \
     and Delete removes it for good. Both show every file first, and neither touches the game's own files or the frameworks.\n\n\
@@ -188,6 +188,7 @@ impl App {
             ui.set_width((screen.x - 80.0).clamp(300.0, 640.0));
             ui.heading(match rm.mods.as_slice() { [one] => format!("Remove {}", one.0), all => format!("Remove {} mods", all.len()) });
             ui.label(REMOVE_INFO);
+            if folder_row(ui, "Backups go to", &game) { self.notice = open_folder(&game) }
             ui.add_space(6.0);
             egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries, mo2) in &mut rm.mods {
                 ui.label(RichText::new(name.as_str()).strong()).on_hover_text(why.as_str());
@@ -229,7 +230,7 @@ impl App {
         let mut t = match (done.is_empty(), delete) {
             (true, _) => String::new(),
             (false, true) => format!("Deleted {}.", done.join(", ")),
-            (false, false) => format!("Backed up and removed {}. The Backups window can put {} back.", done.join(", "), if done.len() == 1 { "it" } else { "them" }),
+            (false, false) => format!("Backed up and removed {} to {}. The Backups window can put {} back.", done.join(", "), game.join(remove::DIR).display(), if done.len() == 1 { "it" } else { "them" }),
         };
         for f in &failed { t += &format!("\n{f}") }
         self.notice = Some((failed.is_empty(), t.trim().to_string())).filter(|n| !n.1.is_empty());
@@ -243,13 +244,14 @@ impl App {
         let (mut open, mut act) = (true, None);                 // act: (backup, restore?)
         egui::Window::new("Backups").open(&mut open).default_width(620.0).collapsible(false).show(ctx, |ui| {
             ui.weak(BACKUPS_INFO);
+            if folder_row(ui, "Kept in", &game) { self.notice = open_folder(&game) }
             ui.separator();
             if list.is_empty() { ui.label("No backups."); }
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| for b in list {
                 let asked = self.discard.as_ref() == Some(&b.dir);
                 ui.horizontal(|ui| {
                     ui.weak(&b.date);
-                    ui.label(RichText::new(&b.name).strong()).on_hover_text(format!("{}\n\n{}", b.why, b.paths.join("\n")));
+                    ui.label(RichText::new(&b.name).strong()).on_hover_text(format!("{}\n\n{}\n\nIn {}", b.why, b.paths.join("\n"), b.dir.display()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| if asked {
                         if ui.small_button("Keep").clicked() { self.discard = None }
                         if ui.small_button(RichText::new("Delete for good").color(BAD)).clicked() { act = Some((b.clone(), false)) }
@@ -318,6 +320,23 @@ impl App {
 
 fn exe_dir() -> Option<PathBuf> { env::current_exe().ok()?.parent().map(Path::to_path_buf) }
 
+/// The backup folder's full path, with Open folder once it exists. Returns true when Open folder is pressed.
+fn folder_row(ui: &mut egui::Ui, label: &str, game: &Path) -> bool {
+    let d = game.join(remove::DIR);
+    ui.horizontal(|ui| {
+        ui.weak(label);
+        let open = ui.add_enabled(remove::home(game).is_ok_and(|d| d.is_dir()), egui::Button::new("Open folder"))
+            .on_disabled_hover_text("Made with the first backup").clicked();
+        ui.add(egui::Label::new(RichText::new(d.display().to_string()).monospace()).truncate()).on_hover_text(d.display().to_string());
+        open
+    }).inner
+}
+/// Shows the backup folder in the system's file manager. Only ever that folder, and only if it's a plain folder.
+fn open_folder(game: &Path) -> Option<(bool, String)> {
+    let d = remove::home(game).ok().filter(|d| d.is_dir())?;
+    let r = if cfg!(windows) { Command::new("explorer").arg(&d).spawn() } else { Command::new("xdg-open").arg(&d).spawn() };
+    r.err().map(|e| (false, format!("Couldn't open {}: {e}", d.display())))
+}
 fn reds(r: &Report) -> usize { r.rows.iter().filter(|x| x.status == Status::Red).count() }
 
 /// The game folder a launch command points into, e.g. Steam's `...\Cyberpunk 2077\REDprelauncher.exe`.
