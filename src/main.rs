@@ -10,7 +10,7 @@ use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
 use std::{env, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
 const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
-const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), ", MIT license. \
+const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), " by FauxNoodles on Nexus Mods, MIT license. \
     It never connects to the internet: \"Open on Nexus\" hands the mod's page to your own web browser. \
     It changes files only when you ask: Back up and remove moves a broken mod into _mod_backups in your game folder, \
     and Delete removes it for good. Both show every file first, and neither touches the game's own files or the frameworks.\n\n\
