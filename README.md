@@ -17,7 +17,7 @@ To have it check before every launch, see [Checking before every launch](#checki
 
 - It finds your game by itself (Steam, GOG or Epic on Windows; Steam or Heroic on Linux) and reads its version, your frameworks (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware and others), your mods, Mod Organizer 2's included, and the logs from your last launch.
 - It compares them with a curated list of the lowest framework versions that work on each game build, the mods that depend on them, and known problems. The list is updated after game patches (see [The compatibility list](#the-compatibility-list)).
-- Each framework, and each mod that depends on one, gets a verdict: red (likely to break), gray (not confirmed for your build yet) or green (OK). Each comes with the reason and **Open on Nexus** for the update.
+- Each framework, and each mod that depends on one, gets a verdict: red (likely to break), gray (not confirmed for your build yet) or green (OK). Each comes with the reason and **Open on Nexus** for the update. Other mods appear only when something is wrong with them (see [Which mods it shows](#which-mods-it-shows)).
 - If you ask, it backs up and removes a broken mod until its update arrives, then restores it. It lists every file before changing anything.
 - With one line in Steam's launch options, it checks every time you press Play. The game starts at once when nothing is red. Otherwise the app shows what's wrong and waits for you.
 
@@ -53,6 +53,24 @@ Each is a single program with nothing to install and nothing unpacked to a temp 
 
    Hover a circle or a reason to read it in full. A banner at the top warns when your game is newer than the list, which usually means CDPR has just released a patch.
 4. Use **Open on Nexus** or **Copy link** to get each update, or **Remove…** to take a broken mod out until then.
+
+## Which mods it shows
+
+It doesn't list every mod you have, only the ones most likely to break after a patch and the ones your last launch shows broken, so seeing 16 of your 66 mods is normal. Mods installed with Mod Organizer 2 count the same as the rest.
+
+**Always listed when installed:**
+
+- **Frameworks** (RED4ext, Cyber Engine Tweaks, redscript, ArchiveXL, TweakXL, Codeware, RedFileSystem, Mod Settings, Input Loader, Native Settings UI, Audioware) and **the mods on the list that lean on them**, such as Appearance Menu Mod, Equipment-EX and Virtual Atelier. Each gets red, gray or green. A missing framework is listed only when one of your mods needs it.
+- **RED4ext plugins and `.asi` files the list doesn't know**, in the gray **Unlisted native plugins** group. Gray here means not judged: they hook the game directly, so check them after a patch. A RED4ext plugin built for another game version turns red.
+
+**Shown only when something is wrong:**
+
+- **Archive mods** (`archive/pc/mod`): when ArchiveXL skipped the mod's world edits at your last launch.
+- **Script mods** (`r6/scripts`): when redscript couldn't compile the mod, or RED4ext closed the game over one of its scripts.
+- **TweakXL, CET and REDmod mods** (`r6/tweaks`, CET's `mods`, `mods`): no check of their own yet. Errors that TweakXL, ArchiveXL and other RED4ext plugins log appear under **Your last launch**. CET's logs aren't read.
+- **Any of these** also turn red when a mod's log at your last launch calls the file older, conflicting or still installed, or when the list knows a clash between its files. With Advanced Crash Reporter installed, **Your last launch** can also name any mod as the crash's culprit or on its call path.
+
+**Gray** on a listed mod means the list doesn't cover your game build, is still a draft for it, couldn't read the mod's version, or the mod needs a framework that's gray. The green **OK** group starts collapsed: click its title to open it.
 
 ## Checking before every launch
 
