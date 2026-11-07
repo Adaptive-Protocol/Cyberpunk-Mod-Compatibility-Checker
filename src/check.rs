@@ -354,8 +354,8 @@ fn error_line(l: &str) -> Option<(Option<&str>, &str)> {
 }
 
 /// A mod the game won't run: a plugin RED4ext refused or one built for another game runtime, a script mod redscript
-/// couldn't compile, world edits ArchiveXL skipped, a script RED4ext closed the game over, or a file a mod's log says is
-/// in its way. `folder` is its entry, lowercase, such as "red4ext/plugins/archivexl". With `near`, Remove offers only
+/// couldn't compile, world edits ArchiveXL skipped, a script RED4ext closed the game over, a file a mod's log says is
+/// in its way, or a mod whose code Advanced Crash Reporter caught running when the game crashed. `folder` is its entry, lowercase, such as "red4ext/plugins/archivexl". With `near`, Remove offers only
 /// same-named entries beside it (a file left from an older version and its .xl), never the mod's parts elsewhere.
 #[derive(Clone, Debug)]
 pub struct Refused { pub folder: String, pub name: String, pub version: Option<String>, pub why: String, pub near: bool }
@@ -367,6 +367,7 @@ pub struct Last {
     pub refused: Vec<Refused>,                // plugins RED4ext refused to load
     pub errors: Vec<(String, String)>,        // (who, message) from the mods' own logs
     pub crash: Option<(String, String)>,      // (what Advanced Crash Reporter concluded, its report)
+    pub report: Option<PathBuf>,              // that report, for Open report
     pub memory: Option<String>,               // memory was nearly full when the game crashed or closed
     pub lead: Option<String>,                 // the mods named after a character the crash report names, such as a redesign
 }
@@ -451,11 +452,14 @@ fn gone(roots: &[&Path], folder: &str, at: SystemTime) -> bool {
 /// `framework` tells a framework's mod entry, which a log can't make a leftover.
 fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, entries: &[Vec<String>]) -> Option<Last> {
     let logs: Vec<PathBuf> = roots.iter().filter_map(|r| resolve(r, "red4ext/logs")).flat_map(|d| files(&d)).collect();
-    let (log, stamp) = logs.iter().filter_map(|p| log_name(&name(p)).filter(|(w, _)| w.eq_ignore_ascii_case("red4ext")).map(|(_, d)| (p, d)))
-        .max_by(|a, b| a.1.cmp(&b.1))?;
-    let text = String::from_utf8_lossy(&read(log, 16 << 20)?).into_owned();
-    if !text.lines().any(|l| l.split("File version: ").nth(1).is_some_and(|v| v.trim() == exe)) { return None }
-    let at = fs::metadata(log).and_then(|m| m.modified()).ok()?;
+    let r4 = logs.iter().filter_map(|p| log_name(&name(p)).filter(|(w, _)| w.eq_ignore_ascii_case("red4ext")).map(|(_, d)| (p, d)))
+        .max_by(|a, b| a.1.cmp(&b.1)).and_then(|(log, stamp)| {
+            let text = String::from_utf8_lossy(&read(log, 16 << 20)?).into_owned();
+            text.lines().any(|l| l.split("File version: ").nth(1).is_some_and(|v| v.trim() == exe)).then(|| (log.clone(), stamp, text))
+        });
+    // without RED4ext, Advanced Crash Reporter's own log tells when the last launch started
+    let (log, stamp, text) = r4.or_else(|| Some((PathBuf::new(), acr_launch(roots, exe)?, String::new())))?;
+    let at = fs::metadata(&log).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
     let mut last = Last { when: when(&stamp), ..Default::default() };
 
     let mut folder = String::new();
@@ -581,7 +585,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, ent
         last.refused.push(Refused { folder: p.to_lowercase(), name, version: None, near: true, why: format!("{who}'s log at your last launch ({}): \"{msg}\" {how}", last.when) });
     }
 
-    let reports = roots.iter().find_map(|r| resolve(r, "bin/x64/plugins/AdvancedCrashReporter/reports"));
+    let reports = reports_dir(roots);
     let mut found: Vec<(String, PathBuf)> = reports.iter().flat_map(|d| files(d)).filter_map(|p| {
         let n = name(&p);
         let d: String = n.get(..15)?.chars().filter(char::is_ascii_digit).collect();
@@ -604,12 +608,20 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, ent
             // a crash when memory ran out isn't a mod's fault, whatever the verdict says
             last.crash = Some((if oom { format!("Your last launch {did} because the game ran out of memory{nums}: {FREE}. Advanced Crash Reporter's verdict ({v}) likely doesn't apply.") }
                                else { format!("Your last launch {did}. Advanced Crash Reporter's verdict: {v}.{also}") }, rel));
+            last.report = Some(p.clone());
             if !oom { last.lead = named_after(&t, roots, entries, framework) }
+            // the mod whose own code was running: unless it's a framework, or changed since
+            if !oom && let Some((u, version, strength)) = culprit(&t, roots, framework)
+                && let Ok(at) = fs::metadata(p).and_then(|m| m.modified()) && !gone(roots, &u, at) {
+                last.refused.push(Refused { folder: u.to_lowercase(), name: u.rsplit('/').next().unwrap_or(&u).to_string(), version, near: false, why: format!(
+                    "{strength} culprit of your last launch's {} ({}), says Advanced Crash Reporter: its own code was running then. Update it, or back it up and remove it.",
+                    if hang { "freeze" } else { "crash" }, last.when) });
+            }
         }
         break;
     }
     if oom && last.crash.is_none() {
-        let rel = roots.iter().find_map(|r| log.strip_prefix(r).ok()).unwrap_or(log).display().to_string();
+        let rel = roots.iter().find_map(|r| log.strip_prefix(r).ok()).unwrap_or(&log).display().to_string();
         last.crash = Some((format!("Your last launch crashed because the game ran out of memory: {FREE}."), rel));
     }
     // no crash: the crash reporter's newest routine snapshot of this launch, from a few seconds before the game closed
@@ -623,6 +635,49 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, ent
         last.memory = Some(format!("Memory was nearly full {at} ({c} committed, {g} of it by the game), and running out can crash the game or cut its sound: {FREE}."));
     }
     Some(last)
+}
+
+/// Where Advanced Crash Reporter writes its reports: the `output_dir` its config.ini sets (relative to its folder), or
+/// the reports folder beside it.
+fn reports_dir(roots: &[&Path]) -> Option<PathBuf> {
+    let acr = roots.iter().find_map(|r| resolve(r, "bin/x64/plugins/AdvancedCrashReporter"))?;
+    let ini = read(&acr.join("config.ini"), 1 << 16).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let set = ini.lines().find_map(|l| l.trim().strip_prefix("output_dir")?.trim_start().strip_prefix('=').map(|v| v.trim().trim_matches('"').to_string()));
+    set.filter(|v| !v.is_empty()).map(|v| acr.join(v)).filter(|d| d.is_dir()).or_else(|| resolve(&acr, "reports"))
+}
+
+/// When the last launch started ("20261104181648"), from the first line of Advanced Crash Reporter's own log, if that
+/// launch ran `exe` ("module #000 loaded: Cyberpunk2077.exe [GAME-EXE] gap=0.000s v3.0.88.46235").
+fn acr_launch(roots: &[&Path], exe: &str) -> Option<String> {
+    let b = read(&roots.iter().find_map(|r| resolve(r, "bin/x64/plugins/AdvancedCrashReporter/AdvancedCrashReporter.log"))?, 16 << 20)?;
+    let t = String::from_utf8_lossy(&b);
+    let d: String = t.get(1..20)?.chars().filter(char::is_ascii_digit).collect();
+    (d.len() == 14 && t.lines().take(50).any(|l| l.contains("loaded: Cyberpunk2077.exe") && l.trim_end().ends_with(&format!(" v{exe}")))).then_some(d)
+}
+
+/// The mod entry Advanced Crash Reporter calls the strong or likely culprit, when its own code was running (MOD
+/// INVOLVEMENT's "RUNNING" blocks, each mod followed by `in <its folder>`), with its version and "Strong" or "Likely".
+/// Never a framework: crashes often only pass through one, so the verdict line covers those.
+fn culprit(report: &str, roots: &[&Path], framework: &dyn Fn(&str) -> bool) -> Option<(String, Option<String>, String)> {
+    let (strength, who) = field(report, "Verdict")?.split_once(" culprit: ").filter(|(s, _)| ["Strong", "Likely"].contains(s))?;
+    let (mut running, mut module) = (false, "");
+    for l in report.lines().skip_while(|l| !l.starts_with("# MOD INVOLVEMENT")).skip(1).take_while(|l| !l.starts_with("# ")) {
+        if !l.starts_with(' ') { running = l.contains(" RUNNING "); continue }
+        let t = l.trim();
+        if !running || t.starts_with("->") { continue }
+        // a module's own line, "BlurBegoneNative.dll  [MOD-RED4EXT ] frame #32", then its folder: "RED4ext plugin "BlurBegoneNative" 2.6.0 by CyanideX, in red4ext/plugins/BlurBegone"
+        let path = match t.split_once(' ').map(|(m, r)| (m, r.trim_start())).filter(|(_, r)| r.starts_with('[')) {
+            Some((m, r)) => { module = m; if r.starts_with("[MOD") && m.to_ascii_lowercase().ends_with(".asi") { format!("bin/x64/plugins/{m}") } else { continue } }
+            None => t.to_string(),
+        };
+        let Some(u) = named(roots, &path).and_then(|p| unit(&p)) else { continue };
+        let stem = module.rsplit_once('.').map_or(module, |m| m.0);
+        if (key(&u) == key(who) || stem.eq_ignore_ascii_case(who)) && !framework(&u) {
+            let version = t.split('"').nth(2).and_then(|v| v.split_whitespace().next()).filter(|v| v.starts_with(|c: char| c.is_ascii_digit()));
+            return Some((u, version.map(str::to_string), strength.to_string()));
+        }
+    }
+    None
 }
 
 /// The mods named after a character Advanced Crash Reporter names among the objects the crash was handling ("objects: animRig,
@@ -1327,6 +1382,60 @@ mod tests {
             "The crash report names misty.ent, so try without the mods named after Misty first: !!00_Misty_Goth_Redesign.archive, misty_explicit.xl \
              and MistyHair.archive (in {}).", m.file_name().unwrap().to_string_lossy()), "not one in another mod's folder");
         assert!(lead("animRig, NPCPuppet citizen__ep1_tenant_ma.ent").is_none(), "a passer-by");
+    }
+
+    #[test]
+    fn crash_reporter_culprit() {
+        let root = install("culprit", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", None),
+            ("red4ext/plugins/BlurBegone/BlurBegoneNative.dll", None), ("r6/scripts/BlurBegone/b.reds", None), ("red4ext/plugins/Other/o.dll", None),
+            ("bin/x64/plugins/Hook.asi", None), ("bin/x64/plugins/AdvancedCrashReporter.asi", None)]);
+        let (acr, moved) = (root.join("bin/x64/plugins/AdvancedCrashReporter"), root.join("Crashes"));
+        for d in [acr.join("reports"), moved.clone()] { fs::create_dir_all(d).unwrap() }
+        // no RED4ext log: Advanced Crash Reporter's own log dates the launch
+        fs::write(acr.join("AdvancedCrashReporter.log"), "[2026-11-04 03:25:00.001] [  0.001s] [INFO ] exception handler installed\n\
+            [2026-11-04 03:25:02.000] [  2.169s] [INFO ] module #000 loaded: Cyberpunk2077.exe                [GAME-EXE    ] gap=0.000s v3.0.88.46235\n").unwrap();
+        let crash = |dir: &Path, verdict: &str, running: &str| fs::write(dir.join("20261104-033004-crash-tid1-02.txt"), format!(
+            "Game version   : 2.5 (3.0.88.46235, built 2026-10-19)\nVerdict        : {verdict}\n\n====\n# MOD INVOLVEMENT\n====\n\
+             Mod code RUNNING on the analyzed thread:\n{running}  -> The strongest evidence there is: this mod's own code was executing when it\n     happened.\n\n\
+             Mod hooks on the call path (NOT running):\n  none\n\nMods present on OTHER threads (NOT evidence):\n  o.dll                          [MOD-RED4EXT ] 2 threads\n\
+                 in red4ext/plugins/Other\n\n====\n# PRIMARY STACK\n")).unwrap();
+        let blur = "  BlurBegoneNative.dll           [MOD-RED4EXT ] frame #32\n    RED4ext plugin \"BlurBegoneNative\" 2.6.0 by CyanideX, in red4ext/plugins/BlurBegone\n";
+        let rows = || { let r = scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap(); (r.rows.iter().filter(|x| x.status == Status::Red).map(|x| x.name.clone()).collect::<Vec<_>>(), r) };
+        crash(&acr.join("reports"), "Likely culprit: BlurBegone", blur);
+        let (red, r) = rows();
+        let (l, b) = (r.last.as_ref().unwrap(), r.rows.iter().find(|x| x.name == "BlurBegone").unwrap());
+        assert!(l.when == "2026-11-04 03:25" && l.report.as_ref().is_some_and(|p| p.ends_with("reports/20261104-033004-crash-tid1-02.txt")) && red == ["BlurBegone"], "{red:?}");
+        assert_eq!(b.why, "Likely culprit of your last launch's crash (2026-11-04 03:25), says Advanced Crash Reporter: its own code was running then. \
+                           Update it, or back it up and remove it.");
+        assert!(b.version.as_deref() == Some("2.6.0") && b.remove == [("red4ext/plugins/BlurBegone".to_string(), Part::Own), ("r6/scripts/BlurBegone".into(), Part::Kin)]);
+        assert!(!r.unlisted.contains(&"BlurBegone".to_string()));
+        crash(&acr.join("reports"), "Strong culprit: Hook", "  Hook.asi                       [MOD-ASI     ] frame #3\n");
+        let (red, r) = rows();
+        assert!(red == ["Hook.asi"] && r.rows[0].why.starts_with("Strong culprit of your last launch's crash") && r.rows[0].remove == [("bin/x64/plugins/Hook.asi".to_string(), Part::Own)], "{red:?}");
+        // not a possible culprit, a framework, a mod on another thread, or a mod changed since
+        for (v, running) in [("Possible culprit: BlurBegone", blur), ("Likely culprit: ArchiveXL", "  ArchiveXL.dll  [MOD-RED4EXT ] frame #0\n    in red4ext/plugins/ArchiveXL\n"),
+                             ("Likely culprit: Other", "  none\n")] {
+            crash(&acr.join("reports"), v, running);
+            assert!(rows().0.is_empty(), "{v}");
+        }
+        crash(&acr.join("reports"), "Likely culprit: BlurBegone", blur);
+        fs::File::options().write(true).open(acr.join("reports/20261104-033004-crash-tid1-02.txt")).unwrap().set_modified(SystemTime::now() - Duration::from_secs(3600)).unwrap();
+        assert!(rows().0.is_empty(), "updated after the crash");
+
+        // reports moved by config.ini's output_dir
+        fs::remove_file(acr.join("reports/20261104-033004-crash-tid1-02.txt")).unwrap();
+        crash(&moved, "Likely culprit: BlurBegone", blur);
+        assert!(rows().1.last.unwrap().crash.is_none());
+        fs::write(acr.join("config.ini"), format!("[general]\n; output_dir = elsewhere\noutput_dir = {}\n", moved.display())).unwrap();
+        let (red, r) = rows();
+        assert!(red == ["BlurBegone"] && r.last.unwrap().report.is_some_and(|p| p.starts_with(&moved)));
+
+        // the game ran out of memory: the verdict likely doesn't apply, and neither does the culprit
+        fs::create_dir_all(root.join("red4ext/logs")).unwrap();
+        fs::write(root.join("red4ext/logs/red4ext-2026-11-04-03-25-01.log"), "[2026-11-04 03:25:01.000] [info    ] [ 1] [RED4ext] File version: 3.0.88.46235\n\
+            [2026-11-04 03:30:03.000] [error   ] [ 1] [RED4ext] Crash report\n[2026-11-04 03:30:03.000] [error   ] [ 1] [RED4ext] Message: Out of Memory!\n").unwrap();
+        let (red, r) = rows();
+        assert!(red.is_empty() && r.last.unwrap().crash.unwrap().0.contains("ran out of memory"));
     }
 
     #[test]

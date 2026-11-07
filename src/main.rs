@@ -7,7 +7,7 @@ mod remove;
 
 use check::{Manifest, Part, Report, Status};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
-use std::{env, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
+use std::{env, fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
 const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
 const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), " by FauxNoodles on Nexus Mods, MIT license. \
@@ -17,6 +17,8 @@ const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO
     The compatibility list is curated by the maintainer and built into each release. A newer compat.toml placed next to the app is used instead. \
     Besides your mods, the app reads the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) \
     and, on Windows, the version of the Visual C++ runtime.\n\n\
+    Crash and freeze reports come from Advanced Crash Reporter by Akiway (nexusmods.com/cyberpunk2077/mods/34403), when it's installed. \
+    The app only reads them; none of its code is used.\n\n\
     Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch \
     and the rows with coloured status circles. Framework background from the RED Modding wiki (wiki.redmodding.org). \
     Backing a mod up instead of deleting it follows the reversible disable in mod managers such as Vortex and Mod Organizer 2, \
@@ -108,6 +110,7 @@ impl App {
         let of = |s| rows.iter().copied().filter(move |x| x.status == s).collect::<Vec<_>>();
         let unlisted: Vec<_> = r.unlisted.iter().filter(|n| n.to_lowercase().contains(&q)).collect();
         let mut ask: Option<Vec<&check::Row>> = None;          // rows whose Remove… was pressed
+        let mut report = false;                                  // Open report was pressed
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             if !r.crash_reporter {
                 ui.horizontal(|ui| {
@@ -128,8 +131,15 @@ impl App {
                 let title = format!("Your last launch, {}: {}", l.when, what.join(", and "));
                 group(ui, "last", Color32::RED, title, n, true, |ui| {
                     ui.weak(LAST_TIP);
-                    if let Some((c, report)) = &l.crash {
-                        ui.horizontal(|ui| { dot(ui, Color32::RED, report); ui.add(egui::Label::new(RichText::new(c).strong()).truncate().show_tooltip_when_elided(false)).on_hover_text(format!("{c}\n\nReport: {report}")) });
+                    if let Some((c, file)) = &l.crash {
+                        ui.horizontal(|ui| {
+                            dot(ui, Color32::RED, file);
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                report |= l.report.is_some() && ui.small_button("Open report").on_hover_text("Opens Advanced Crash Reporter's report in your text editor").clicked();
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| ui.add(egui::Label::new(RichText::new(c).strong()).truncate().show_tooltip_when_elided(false))
+                                    .on_hover_text(format!("{c}\n\nReport: {file}")));
+                            });
+                        });
                     }
                     for m in [&l.lead, &l.memory].into_iter().flatten() { ui.horizontal(|ui| { dot(ui, Color32::RED, ""); ui.add(egui::Label::new(RichText::new(m).strong()).truncate()) }); }
                     for (who, msg) in &l.errors {
@@ -186,6 +196,7 @@ impl App {
             }).map(|(p, part)| (p.clone(), part.clone(), true)).collect(), x.mo2.clone())).collect();
             self.removal = Some(Removal { mods, delete: false });
         }
+        if report && let Some(p) = r.last.as_ref().and_then(|l| l.report.as_ref()) { self.notice = open(p, false) }
     }
 
     /// The Remove dialog. Nothing changes until the user presses Back up and remove, or Delete and then Delete for good.
@@ -343,10 +354,12 @@ fn folder_row(ui: &mut egui::Ui, label: &str, game: &Path) -> bool {
     }).inner
 }
 /// Shows the backup folder in the system's file manager. Only ever that folder, and only if it's a plain folder.
-fn open_folder(game: &Path) -> Option<(bool, String)> {
-    let d = remove::home(game).ok().filter(|d| d.is_dir())?;
-    let r = if cfg!(windows) { Command::new("explorer").arg(&d).spawn() } else { Command::new("xdg-open").arg(&d).spawn() };
-    r.err().map(|e| (false, format!("Couldn't open {}: {e}", d.display())))
+fn open_folder(game: &Path) -> Option<(bool, String)> { open(&remove::home(game).ok()?, true) }
+/// Shows a plain folder in the file manager, or opens a plain file (never a link) in its default app, such as a crash report in a text editor.
+fn open(p: &Path, dir: bool) -> Option<(bool, String)> {
+    if !fs::symlink_metadata(p).is_ok_and(|m| if dir { m.is_dir() } else { m.is_file() }) { return None }
+    let with = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    Command::new(with).arg(p).spawn().err().map(|e| (false, format!("Couldn't open {} with {with}: {e}", p.display())))
 }
 fn reds(r: &Report) -> usize { r.rows.iter().filter(|x| x.status == Status::Red).count() }
 
