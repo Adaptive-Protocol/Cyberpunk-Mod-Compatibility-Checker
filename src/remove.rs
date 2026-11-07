@@ -14,7 +14,7 @@ pub const DIR: &str = "_mod_backups";
 const LIST: &str = "backup.toml";
 
 /// A backed-up mod: its name, why it was removed, the date, and the entries it held, relative to the game folder.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Backup { pub name: String, pub why: String, pub date: String, pub paths: Vec<String>, #[serde(skip)] pub dir: PathBuf }
 
@@ -133,9 +133,10 @@ fn owned(game: &Path, b: &Backup) -> Result<(), String> {
 /// Back up and remove: moves `paths` into a new backup folder. Returns that folder.
 pub fn backup(game: &Path, name: &str, why: &str, paths: &[String]) -> Result<PathBuf, String> {
     let from = checked(game, paths, false)?;
-    let (root, base) = (home(game)?, format!("{} {}", today(), safe(name)));
+    let (root, date) = (home(game)?, today());                // once, so the folder and backup.toml agree across midnight
+    let base = format!("{date} {}", safe(name));
     let dir = (1..).map(|n| root.join(if n == 1 { base.clone() } else { format!("{base} ({n})") })).find(|d| d.symlink_metadata().is_err()).unwrap();
-    let b = Backup { name: name.into(), why: why.into(), date: today(), paths: paths.to_vec(), dir: PathBuf::new() };
+    let b = Backup { name: name.into(), why: why.into(), date, paths: paths.to_vec(), dir: PathBuf::new() };
     fs::create_dir_all(&dir).and_then(|_| fs::write(dir.join(LIST), toml::to_string(&b).unwrap_or_default()))   // the list first, so nothing is ever orphaned
         .map_err(|e| format!("Couldn't create {}: {e}.", dir.display()))?;
     shift(&from, &paths.iter().map(|p| dir.join(p)).collect::<Vec<_>>(), paths).inspect_err(|_| prune(&dir))?;

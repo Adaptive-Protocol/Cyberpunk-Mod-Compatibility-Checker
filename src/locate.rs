@@ -1,5 +1,5 @@
 //! Finds the game folder (Steam, GOG, Epic; Windows and Linux) and Mod Organizer 2's enabled mods. Read-only.
-use std::{env, fs, path::{Path, PathBuf}};
+use std::{env, fs, iter, path::{Path, PathBuf}};
 
 pub fn is_game(p: &Path) -> bool { p.join("bin/x64/Cyberpunk2077.exe").is_file() }
 
@@ -7,8 +7,9 @@ fn home() -> PathBuf { env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HO
 
 /// `"key"  "value"` pairs from a Steam .vdf or a JSON-ish manifest line, with `\\` unescaped.
 fn values<'a>(text: &'a str, key: &'a str) -> impl Iterator<Item = String> + 'a {
+    let key = format!("\"{key}\"");
     text.lines().filter_map(move |l| {
-        let rest = l.trim().strip_prefix(&format!("\"{key}\""))?.trim_start_matches([' ', '\t', ':']).trim().trim_end_matches(',');
+        let rest = l.trim().strip_prefix(&key)?.trim_start_matches([' ', '\t', ':']).trim().trim_end_matches(',');
         Some(rest.strip_prefix('"')?.strip_suffix('"')?.replace("\\\\", "\\"))
     })
 }
@@ -23,7 +24,7 @@ pub fn find_game() -> Option<PathBuf> {
     let h = home();
     let mut c: Vec<PathBuf> = steam_roots().iter().flat_map(|s| {
         let libs = fs::read_to_string(s.join("steamapps/libraryfolders.vdf")).map(|t| values(&t, "path").map(PathBuf::from).collect::<Vec<_>>()).unwrap_or_default();
-        [s.clone()].into_iter().chain(libs).map(|l| l.join("steamapps/common/Cyberpunk 2077")).collect::<Vec<_>>()
+        iter::once(s.clone()).chain(libs).map(|l| l.join("steamapps/common/Cyberpunk 2077"))
     }).collect();
     if cfg!(windows) {
         let epic = fs::read_dir("C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests").into_iter().flatten().flatten()
@@ -104,14 +105,14 @@ pub fn find_mo2(game: &Path) -> Option<PathBuf> {
 /// The enabled mod folders of an MO2 instance's selected profile, highest priority first. Each is laid over the game folder.
 pub fn mo2_mods(instance: &Path) -> Result<Vec<PathBuf>, String> {
     let t = fs::read_to_string(instance.join("ModOrganizer.ini")).map_err(|_| format!("No ModOrganizer.ini in {}.", instance.display()))?;
-    let base = ini(&t, "base_directory").map_or(instance.to_path_buf(), PathBuf::from);
-    let dir = |key: &str, default: &str| ini(&t, key).map_or(base.join(default), |v| PathBuf::from(v.replace("%BASE_DIR%", &base.to_string_lossy())));
+    let base = ini(&t, "base_directory").map_or_else(|| instance.to_path_buf(), PathBuf::from);
+    let dir = |key: &str, default: &str| ini(&t, key).map_or_else(|| base.join(default), |v| PathBuf::from(v.replace("%BASE_DIR%", &base.to_string_lossy())));
     let profile = ini(&t, "selected_profile").unwrap_or_else(|| "Default".into());
     let list = fs::read_to_string(dir("profiles_directory", "profiles").join(&profile).join("modlist.txt"))
         .map_err(|_| format!("Couldn't read the mod list of MO2 profile {profile:?}."))?;
     let mods = dir("mod_directory", "mods");
     let overwrite = dir("overwrite_directory", "overwrite");   // what the game wrote through MO2, such as logs; above every mod
-    Ok([overwrite].into_iter().chain(list.lines().filter_map(|l| l.strip_prefix('+')).map(|n| mods.join(n.trim()))).filter(|p| p.is_dir()).collect())
+    Ok(iter::once(overwrite).chain(list.lines().filter_map(|l| l.strip_prefix('+')).map(|n| mods.join(n.trim()))).filter(|p| p.is_dir()).collect())
 }
 
 #[cfg(test)]

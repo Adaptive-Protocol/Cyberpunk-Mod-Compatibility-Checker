@@ -5,7 +5,7 @@ mod check;
 mod locate;
 mod remove;
 
-use check::{Manifest, Part, Report, Status};
+use check::{Manifest, Part, Report, Status, count};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
 use std::{env, fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
@@ -84,7 +84,7 @@ impl App {
     }
 
     fn poll(&mut self) {
-        if self.job.as_ref().is_some_and(|j| j.is_finished()) {
+        if self.job.as_ref().is_some_and(JoinHandle::is_finished) {
             self.report = Some(self.job.take().unwrap().join().unwrap_or_else(|_| Err("The scan stopped unexpectedly.".into())));
             self.n_backups = match &self.report { Some(Ok(r)) => remove::list(&r.game).len(), _ => 0 };
         }
@@ -124,9 +124,9 @@ impl App {
                 ui.add_space(4.0);
             }
             if let Some(l) = &r.last {
-                let n = l.errors.len() + [l.crash.is_some(), l.memory.is_some(), l.lead.is_some()].into_iter().filter(|&x| x).count();
+                let n = l.errors.len() + [l.crash.is_some(), l.memory.is_some(), l.lead.is_some()].into_iter().map(usize::from).sum::<usize>();
                 let mut what = vec![];
-                if l.crash.is_some() { what.push("it crashed".to_string()) } else if l.memory.is_some() { what.push("memory ran nearly full".into()) }
+                if l.crash.is_some() { what.push("it crashed".to_string()) } else if l.memory.is_some() { what.push("memory ran nearly full".to_string()) }
                 if !l.errors.is_empty() || what.is_empty() { what.push(format!("mods logged {}", count(l.errors.len(), "error"))) }
                 let title = format!("Your last launch, {}: {}", l.when, what.join(", and "));
                 group(ui, "last", Color32::RED, title, n, true, |ui| {
@@ -249,13 +249,9 @@ impl App {
             let r = if delete { remove::delete(&game, name, why, &paths) } else { remove::backup(&game, name, why, &paths).map(|_| ()) };
             match r { Ok(()) => done.push(name.as_str()), Err(e) => failed.push(format!("{name}: {e}")) }
         }
-        let mut t = match (done.is_empty(), delete) {
-            (true, _) => String::new(),
-            (false, true) => format!("Deleted {}.", done.join(", ")),
-            (false, false) => format!("Backed up and removed {} to {}. The Backups window can put {} back.", done.join(", "), game.join(remove::DIR).display(), if done.len() == 1 { "it" } else { "them" }),
-        };
-        for f in &failed { t += &format!("\n{f}") }
-        self.notice = Some((failed.is_empty(), t.trim().to_string())).filter(|n| !n.1.is_empty());
+        let head = (!done.is_empty()).then(|| if delete { format!("Deleted {}.", done.join(", ")) } else { format!(
+            "Backed up and removed {} to {}. The Backups window can put {} back.", done.join(", "), game.join(remove::DIR).display(), if done.len() == 1 { "it" } else { "them" }) });
+        self.notice = Some((failed.is_empty(), head.into_iter().chain(failed).collect::<Vec<_>>().join("\n")));   // never empty: something was ticked
         self.rescan();
     }
 
@@ -305,7 +301,7 @@ impl App {
     }
 
     /// --launch: says why the game hasn't started yet, and lets the user start it anyway or not at all.
-    fn launch_bar(&mut self, ui: &mut egui::Ui) {
+    fn launch_bar(&self, ui: &mut egui::Ui) {
         let n = match &self.report { Some(Ok(r)) => Some(reds(r)), _ => None };
         let text = match n {
                 _ if self.job.is_some() => "Checking your mods before the game starts…".to_string(),
@@ -396,8 +392,6 @@ fn cell(ui: &mut egui::Ui, w: f32, add: impl FnOnce(&mut egui::Ui) -> egui::Resp
     ui.allocate_ui_with_layout(egui::vec2(w, 18.0), Layout::left_to_right(Align::Center), |ui| { ui.set_min_width(w); ui.set_max_width(w); add(ui) });
 }
 
-fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "" } else { "s" }) }
-
 /// A collapsible group headed by a status circle; hidden when empty.
 fn group(ui: &mut egui::Ui, id: &str, color: Color32, title: String, n: usize, open: bool, body: impl FnOnce(&mut egui::Ui)) {
     if n == 0 { return }
@@ -483,7 +477,7 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ctx, |ui| match &self.report {
             Some(Ok(_)) => self.results(ui),
-            _ if self.job.is_some() => { ui.centered_and_justified(|ui| ui.spinner()); }
+            _ if self.job.is_some() => { ui.centered_and_justified(egui::Ui::spinner); }
             _ => self.start_page(ui),
         });
         self.removal_dialog(ctx);
