@@ -5,7 +5,7 @@ mod check;
 mod locate;
 mod remove;
 
-use check::{Manifest, Part, Report, Status};
+use check::{Manifest, Part, Report, Status, count};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
 use std::{env, fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
@@ -249,13 +249,9 @@ impl App {
             let r = if delete { remove::delete(&game, name, why, &paths) } else { remove::backup(&game, name, why, &paths).map(|_| ()) };
             match r { Ok(()) => done.push(name.as_str()), Err(e) => failed.push(format!("{name}: {e}")) }
         }
-        let mut t = match (done.is_empty(), delete) {
-            (true, _) => String::new(),
-            (false, true) => format!("Deleted {}.", done.join(", ")),
-            (false, false) => format!("Backed up and removed {} to {}. The Backups window can put {} back.", done.join(", "), game.join(remove::DIR).display(), if done.len() == 1 { "it" } else { "them" }),
-        };
-        for f in &failed { t += &format!("\n{f}") }
-        self.notice = Some((failed.is_empty(), t.trim().to_string())).filter(|n| !n.1.is_empty());
+        let head = (!done.is_empty()).then(|| if delete { format!("Deleted {}.", done.join(", ")) } else { format!(
+            "Backed up and removed {} to {}. The Backups window can put {} back.", done.join(", "), game.join(remove::DIR).display(), if done.len() == 1 { "it" } else { "them" }) });
+        self.notice = Some((failed.is_empty(), head.into_iter().chain(failed).collect::<Vec<_>>().join("\n")));   // never empty: something was ticked
         self.rescan();
     }
 
@@ -305,7 +301,7 @@ impl App {
     }
 
     /// --launch: says why the game hasn't started yet, and lets the user start it anyway or not at all.
-    fn launch_bar(&mut self, ui: &mut egui::Ui) {
+    fn launch_bar(&self, ui: &mut egui::Ui) {
         let n = match &self.report { Some(Ok(r)) => Some(reds(r)), _ => None };
         let text = match n {
                 _ if self.job.is_some() => "Checking your mods before the game starts…".to_string(),
@@ -395,8 +391,6 @@ fn dot(ui: &mut egui::Ui, color: Color32, tip: &str) {
 fn cell(ui: &mut egui::Ui, w: f32, add: impl FnOnce(&mut egui::Ui) -> egui::Response) {
     ui.allocate_ui_with_layout(egui::vec2(w, 18.0), Layout::left_to_right(Align::Center), |ui| { ui.set_min_width(w); ui.set_max_width(w); add(ui) });
 }
-
-fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "" } else { "s" }) }
 
 /// A collapsible group headed by a status circle; hidden when empty.
 fn group(ui: &mut egui::Ui, id: &str, color: Color32, title: String, n: usize, open: bool, body: impl FnOnce(&mut egui::Ui)) {

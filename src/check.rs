@@ -1,9 +1,11 @@
 //! The compatibility manifest, the install scan and the verdicts.
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use serde::Deserialize;
-use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::Read, path::{Path, PathBuf}, time::SystemTime};
+use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::Read, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
 
 pub const BUILT_IN: &str = include_str!("../compat.toml");
+/// The built-in list, parsed once.
+static BUILT: LazyLock<Manifest> = LazyLock::new(|| Manifest::parse(BUILT_IN).expect("built-in compat.toml is valid"));
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
@@ -68,7 +70,7 @@ impl Manifest {
         if m.schema != 1 { return Err(format!("unsupported schema {}", m.schema)) }
         let outside = |name: &str, p: &String| format!("{name}: path {p:?} must stay inside the game folder");
         let mut known: Vec<&str> = vec![];
-        for (i, e) in m.framework.iter().chain(&m.mods).enumerate() {
+        for (i, e) in m.entries().enumerate() {
             if e.nexus_id == 0 || e.detect.is_empty() { return Err(format!("{}: needs a nexus_id and a detect path", e.name)) }
             if let Some(p) = e.detect.iter().chain(&e.parts).find(|p| !inside(p)) { return Err(outside(&e.name, p)) }
             if let Some(n) = e.needs.iter().find(|n| !known.contains(&n.as_str())) {
@@ -83,10 +85,13 @@ impl Manifest {
         Ok(m)
     }
 
+    /// Every framework, then every mod.
+    fn entries(&self) -> impl Iterator<Item = &Entry> { self.framework.iter().chain(&self.mods) }
+
     /// The built-in list, or a valid `compat.toml` in `dir` with a later `updated` date.
     /// Returns the list, where it came from, and a warning when a copy in `dir` was ignored.
     pub fn load(dir: Option<&Path>) -> (Self, String, Option<String>) {
-        let built_in = Self::parse(BUILT_IN).expect("built-in compat.toml is valid");
+        let built_in = BUILT.clone();
         let Some(path) = dir.map(|d| d.join("compat.toml")).filter(|p| p.is_file()) else { return (built_in, "built in".into(), None) };
         match read(&path, 4 << 20).ok_or_else(|| "unreadable".to_string()).and_then(|b| Self::parse(&String::from_utf8_lossy(&b))) {
             Ok(m) if m.updated > built_in.updated => (m, "from the compat.toml next to the app".into(), None),
@@ -185,6 +190,8 @@ fn key(unit: &str) -> String { unit.rsplit('/').next().unwrap_or("").split('.').
 
 fn files(dir: &Path) -> impl Iterator<Item = PathBuf> + use<> { fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) }
 fn name(p: &Path) -> String { p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()) }
+/// Does `p` end in one of `exts`, such as "dll", in any case?
+fn ext(p: &Path, exts: &[&str]) -> bool { p.extension().is_some_and(|x| exts.iter().any(|e| x.eq_ignore_ascii_case(e))) }
 
 /// A redscript file, for finding the add-ons that build on a mod: its root and **Mod entry**, the module it declares,
 /// the modules it has to import (not those under `@if(ModuleExists(..))`), the classes and functions it defines, and
@@ -264,7 +271,7 @@ fn scripts(roots: &[&Path]) -> Vec<Script> {
     for (root, r) in roots.iter().enumerate() {
         for d in ["r6/scripts", "red4ext/plugins"].into_iter().filter_map(|d| resolve(r, d)) {
             walk(&d, 0, &mut |p: PathBuf| {
-                if !p.extension().is_some_and(|x| x.eq_ignore_ascii_case("reds")) { return }
+                if !ext(&p, &["reds"]) { return }
                 let Some(entry) = p.strip_prefix(r).ok().and_then(|x| unit(&x.to_string_lossy())) else { return };
                 let (module, imports, defs, names) = reds(&String::from_utf8_lossy(&read(&p, 8 << 20).unwrap_or_default()));
                 v.push(Script { root, unit: entry, module, imports, defs, names });
@@ -308,6 +315,10 @@ fn mod_folder(d: &str) -> Option<String> {
     let s: Vec<String> = d.split(['/', '\\']).take(3).map(str::to_lowercase).collect();
     matches!(s.as_slice(), [a, b, _] if (a == "red4ext" && b == "plugins") || (a == "r6" && b == "scripts")).then(|| s.join("/"))
 }
+
+/// A loader DLL a mod puts beside the game exe, such as RED4ext's: "bin/x64/winmm.dll" -> "winmm". Wine loads its own
+/// DLL of that name instead, unless told otherwise.
+fn loader(p: &str) -> Option<String> { p.replace('\\', "/").to_lowercase().strip_prefix("bin/x64/")?.strip_suffix(".dll").filter(|f| !f.contains('/')).map(str::to_string) }
 
 /// The newest time a folder or any file directly in it was modified or created. Logs don't count: mods write those as they run.
 fn changed(p: &Path) -> Option<SystemTime> {
@@ -374,7 +385,7 @@ pub struct Last {
 
 fn older(r: &str, exe: &str) -> &'static str { if cmp_ver(r, exe).is_lt() { "an older" } else { "a newer" } }
 
-fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "" } else { "s" }) }
+pub fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "" } else { "s" }) }
 
 /// "a", "a and b", "a, b and c"
 fn list(v: &[String]) -> String { match v { [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")), _ => v.concat() } }
@@ -419,7 +430,8 @@ fn in_the_way(msg: &str) -> bool {
 /// The installed file or folder in a mod folder that a log line names, from its root: "(F:\...\Cyberpunk 2077\archive\pc\mod\X.archive).
 /// Delete it" -> "archive/pc/mod/X.archive". A path can hold spaces, so trailing words are dropped until one resolves.
 fn named(roots: &[&Path], msg: &str) -> Option<String> {
-    let (m, low) = (msg.replace('\\', "/"), msg.replace('\\', "/").to_ascii_lowercase());     // same byte offsets
+    let m = msg.replace('\\', "/");
+    let low = m.to_ascii_lowercase();                         // same byte offsets
     let starts: Vec<usize> = MOD_DIRS.iter().chain(&["bin/x64/plugins"]).flat_map(|d| low.match_indices(&format!("{d}/")).map(|(i, _)| i).collect::<Vec<_>>())
         .filter(|&i| i == 0 || !low.as_bytes()[i - 1].is_ascii_alphanumeric()).collect();
     starts.into_iter().find_map(|i| {
@@ -740,7 +752,7 @@ fn wrong_runtime(roots: &[&Path], exe: [u64; 4]) -> Vec<Refused> {
             if seen.contains(&folder) { continue }                   // the first root (highest MO2 priority) wins
             seen.push(folder.clone());
             let dlls: Vec<PathBuf> = if f.is_dir() { files(&f).collect() } else { vec![f.clone()] };
-            for dll in dlls.iter().filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dll"))) {
+            for dll in dlls.iter().filter(|p| ext(p, &["dll"])) {
                 let Some(b) = read(dll, 64 << 20) else { continue };
                 let r = runtimes(&b, exe);
                 if r.is_empty() || r.contains(&exe) { continue }
@@ -829,8 +841,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         .flat_map(|d| files(&d)).filter_map(|p| p.strip_prefix(r).ok().map(|x| x.to_string_lossy().replace('\\', "/")))
         .filter(|rel| unit(rel).as_deref() == Some(rel.as_str())).collect()).collect();
     // A framework's entries, and its other entries by name (such as r6/scripts/Audioware), even when a newer list leaves it out
-    let built = Manifest::parse(BUILT_IN).ok();
-    let protect: Vec<String> = m.framework.iter().chain(built.iter().flat_map(|b| &b.framework)).flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
+    let protect: Vec<String> = m.framework.iter().chain(&BUILT.framework).flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
     let framework = |u: &str| protect.iter().any(|p| wild(p, u) || wild(&key(p), &key(u)));
     let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e, &framework, &entries));
     let dir = |u: &str| u.rsplit_once('/').map_or(String::new(), |x| x.0.to_lowercase());
@@ -883,20 +894,17 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     };
 
     let mut state: BTreeMap<&str, Option<Status>> = BTreeMap::new();   // framework -> status, None = not installed
-    let mut rows = vec![];
+    let (mut rows, mut installed) = (vec![], vec![]);                  // installed: the entries that have a row
     let mut claimed: Vec<String> = vec![];                             // plugin folders that have a row
-    for (i, e) in m.framework.iter().chain(&m.mods).enumerate() {
+    for (i, e) in m.entries().enumerate() {
         let fw = i < m.framework.len();
         let Some(_) = e.detect.iter().find_map(|d| find(d)) else { if fw { state.insert(&e.name, None); } continue };
-        let is_pe = |p: &PathBuf| p.extension().is_some_and(|x| ["dll", "exe", "asi"].iter().any(|e| x.eq_ignore_ascii_case(e)));
-        let version = e.detect.first().and_then(|d| find(d)).filter(|p| p.is_file() && is_pe(p)).and_then(|p| pe_version(&p)).map(|(f, _)| show([f[0], f[1], f[2], 0], 3));
+        installed.push(e);
+        let version = e.detect.first().and_then(|d| find(d)).filter(|p| p.is_file() && ext(p, &["dll", "exe", "asi"])).and_then(|p| pe_version(&p)).map(|(f, _)| show([f[0], f[1], f[2], 0], 3));
         let folders: Vec<String> = e.detect.iter().filter_map(|d| mod_folder(d)).collect();
         claimed.extend(folders.iter().cloned());
         let refusal = refused.iter().find(|r| folders.contains(&r.folder));
-        let loader = |p: &String| p.split(['/', '\\']).collect::<Vec<_>>().as_slice().try_into().ok()
-            .filter(|[a, b, _]: &[&str; 3]| a.eq_ignore_ascii_case("bin") && b.eq_ignore_ascii_case("x64"))
-            .and_then(|[_, _, f]| f.to_lowercase().strip_suffix(".dll").map(str::to_string));
-        let no_override = env.wine.as_ref().and_then(|w| e.parts.iter().filter_map(loader).find(|l| !w.contains(l)));
+        let no_override = env.wine.as_ref().and_then(|w| e.parts.iter().filter_map(|p| loader(p)).find(|l| !w.contains(l)));
         let vc = e.vcredist.as_ref().zip(env.vc.as_ref()).filter(|(need, have)| have.as_ref().is_none_or(|h| cmp_ver(h, need).is_lt()));
         let need = |s: Option<Status>| e.needs.iter().find(|n| state.get(n.as_str()).copied().flatten() == s);
         let missing = e.needs.iter().find(|n| state.get(n.as_str()).is_some_and(Option::is_none));
@@ -931,8 +939,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         *c += &format!(" {} itself matches the list for game {b}, so a mod that uses it is the likelier cause.", f.name);
     }
     for f in &m.framework {                                  // missing frameworks matter only when something installed needs them
-        let users: Vec<&str> = rows.iter().filter_map(|r| m.framework.iter().chain(&m.mods).find(|e| e.name == r.name))
-            .filter(|e| e.needs.contains(&f.name)).map(|e| e.name.as_str()).collect();
+        let users: Vec<&str> = installed.iter().filter(|e| e.needs.contains(&f.name)).map(|e| e.name.as_str()).collect();
         if state.get(f.name.as_str()).is_some_and(Option::is_none) && !users.is_empty() {
             rows.push(Row { name: f.name.clone(), nexus_id: Some(f.nexus_id), version: None, status: Red, notes: vec![], remove: vec![], mo2: vec![],
                             why: format!("Not installed, but {} need{} it.", users.join(", "), if users.len() == 1 { "s" } else { "" }) });
@@ -953,14 +960,14 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     }
     rows.sort_by_key(|r| (r.status, r.name.to_lowercase()));
 
-    let listed = |p: &Path| m.framework.iter().chain(&m.mods).flat_map(|e| &e.detect).any(|d| {
-        let d = d.replace('\\', "/").to_lowercase();
-        roots.iter().any(|r| p.strip_prefix(r).is_ok_and(|rel| { let rel = rel.to_string_lossy().replace('\\', "/").to_lowercase(); d == rel || d.starts_with(&format!("{rel}/")) }))
+    let detects: Vec<String> = m.entries().flat_map(|e| &e.detect).map(|d| d.replace('\\', "/").to_lowercase()).collect();
+    let listed = |p: &Path| roots.iter().filter_map(|r| p.strip_prefix(r).ok()).any(|rel| {   // a detect path is p or inside it
+        let rel = rel.to_string_lossy().replace('\\', "/").to_lowercase();
+        detects.iter().any(|d| d.strip_prefix(&rel).is_some_and(|t| t.is_empty() || t.starts_with('/')))
     });
     let mut unlisted: Vec<String> = roots.iter().flat_map(|r| {
         let dirs = resolve(r, "red4ext/plugins").into_iter().flat_map(|p| files(&p)).filter(|p| p.is_dir());
-        let asi = resolve(r, "bin/x64/plugins").into_iter().flat_map(|p| files(&p))
-            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("asi")));
+        let asi = resolve(r, "bin/x64/plugins").into_iter().flat_map(|p| files(&p)).filter(|p| ext(p, &["asi"]));
         dirs.chain(asi).collect::<Vec<_>>()
     }).filter(|p| !listed(p)).map(|p| name(&p)).filter(|n| !rows.iter().any(|r| r.status == Red && r.name.eq_ignore_ascii_case(n))
         && !refused.iter().any(|r| r.folder == format!("red4ext/plugins/{}", n.to_lowercase()))).collect();
