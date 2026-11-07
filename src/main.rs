@@ -84,7 +84,7 @@ impl App {
     }
 
     fn poll(&mut self) {
-        if self.job.as_ref().is_some_and(|j| j.is_finished()) {
+        if self.job.as_ref().is_some_and(JoinHandle::is_finished) {
             self.report = Some(self.job.take().unwrap().join().unwrap_or_else(|_| Err("The scan stopped unexpectedly.".into())));
             self.n_backups = match &self.report { Some(Ok(r)) => remove::list(&r.game).len(), _ => 0 };
         }
@@ -124,9 +124,9 @@ impl App {
                 ui.add_space(4.0);
             }
             if let Some(l) = &r.last {
-                let n = l.errors.len() + [l.crash.is_some(), l.memory.is_some(), l.lead.is_some()].into_iter().filter(|&x| x).count();
+                let n = l.errors.len() + [l.crash.is_some(), l.memory.is_some(), l.lead.is_some()].into_iter().map(usize::from).sum::<usize>();
                 let mut what = vec![];
-                if l.crash.is_some() { what.push("it crashed".to_string()) } else if l.memory.is_some() { what.push("memory ran nearly full".into()) }
+                if l.crash.is_some() { what.push("it crashed".to_string()) } else if l.memory.is_some() { what.push("memory ran nearly full".to_string()) }
                 if !l.errors.is_empty() || what.is_empty() { what.push(format!("mods logged {}", count(l.errors.len(), "error"))) }
                 let title = format!("Your last launch, {}: {}", l.when, what.join(", and "));
                 group(ui, "last", Color32::RED, title, n, true, |ui| {
@@ -477,7 +477,7 @@ impl eframe::App for App {
         });
         egui::CentralPanel::default().show(ctx, |ui| match &self.report {
             Some(Ok(_)) => self.results(ui),
-            _ if self.job.is_some() => { ui.centered_and_justified(|ui| ui.spinner()); }
+            _ if self.job.is_some() => { ui.centered_and_justified(egui::Ui::spinner); }
             _ => self.start_page(ui),
         });
         self.removal_dialog(ctx);

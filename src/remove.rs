@@ -14,7 +14,7 @@ pub const DIR: &str = "_mod_backups";
 const LIST: &str = "backup.toml";
 
 /// A backed-up mod: its name, why it was removed, the date, and the entries it held, relative to the game folder.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Backup { pub name: String, pub why: String, pub date: String, pub paths: Vec<String>, #[serde(skip)] pub dir: PathBuf }
 

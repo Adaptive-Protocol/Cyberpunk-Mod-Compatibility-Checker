@@ -105,8 +105,8 @@ pub fn find_mo2(game: &Path) -> Option<PathBuf> {
 /// The enabled mod folders of an MO2 instance's selected profile, highest priority first. Each is laid over the game folder.
 pub fn mo2_mods(instance: &Path) -> Result<Vec<PathBuf>, String> {
     let t = fs::read_to_string(instance.join("ModOrganizer.ini")).map_err(|_| format!("No ModOrganizer.ini in {}.", instance.display()))?;
-    let base = ini(&t, "base_directory").map_or(instance.to_path_buf(), PathBuf::from);
-    let dir = |key: &str, default: &str| ini(&t, key).map_or(base.join(default), |v| PathBuf::from(v.replace("%BASE_DIR%", &base.to_string_lossy())));
+    let base = ini(&t, "base_directory").map_or_else(|| instance.to_path_buf(), PathBuf::from);
+    let dir = |key: &str, default: &str| ini(&t, key).map_or_else(|| base.join(default), |v| PathBuf::from(v.replace("%BASE_DIR%", &base.to_string_lossy())));
     let profile = ini(&t, "selected_profile").unwrap_or_else(|| "Default".into());
     let list = fs::read_to_string(dir("profiles_directory", "profiles").join(&profile).join("modlist.txt"))
         .map_err(|_| format!("Couldn't read the mod list of MO2 profile {profile:?}."))?;

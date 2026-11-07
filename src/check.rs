@@ -36,7 +36,7 @@ pub struct Entry {
     #[serde(default)] pub notes: Vec<Note>,
 }
 
-#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Note { pub build: String, pub text: String, pub source: String, pub date: String }
 
@@ -109,7 +109,7 @@ fn read(path: &Path, cap: u64) -> Option<Vec<u8>> {
 }
 
 /// "1.28.6.58207" -> [1, 28, 6, 58207]; anything that isn't a digit separates parts.
-fn parts(v: &str) -> Vec<u64> { v.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect() }
+fn parts(v: &str) -> Vec<u64> { v.split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse().ok()).collect() }
 
 /// Compares versions with missing parts read as 0, so "2.5" == "2.5.0.0".
 pub fn cmp_ver(a: &str, b: &str) -> Ordering {
@@ -134,7 +134,7 @@ fn runtimes(b: &[u8], game: [u64; 4]) -> Vec<[u64; 4]> {
         let u = |i: usize| u64::from(u16::from_le_bytes([w[2 + 2 * i], w[3 + 2 * i]]));
         [u(0), u(1), u(2), u(3)]
     }).filter(|r| r[..2] == game[..2] && r[2].abs_diff(game[2]) <= 40 && r[3] >= 1000).collect();
-    v.sort();
+    v.sort_unstable();
     v.dedup();
     v
 }
@@ -245,7 +245,7 @@ fn reds(t: &str) -> (Option<String>, Vec<String>, Vec<String>, HashSet<String>) 
     let word = |t: &str| !b"{}@".contains(&t.as_bytes()[0]);
     let (mut defs, mut depth, mut method) = (vec![], 0usize, false);   // method: the next func wraps, replaces or adds a method
     for (k, t) in toks.iter().enumerate() {
-        let next = toks.get(k + 1).filter(|n| word(n)).map(|n| n.to_string());
+        let next = toks.get(k + 1).filter(|n| word(n)).map(ToString::to_string);
         match *t {
             "{" => depth += 1,
             "}" => depth = depth.saturating_sub(1),
@@ -482,7 +482,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, ent
                 .map_or(String::new(), |f| format!("red4ext/plugins/{}", f.trim_end_matches("'...").to_lowercase()));
         } else if let Some((who, tail)) = l.split("[RED4ext] ").nth(1).and_then(|r| r.split_once(" is incompatible with the current patch"))
             && let Some((name, version)) = who.rsplit_once(" (version: ") {
-            let runtime = tail.split("runtime of the plugin is ").nth(1).map(str::trim).unwrap_or("");
+            let runtime = tail.split("runtime of the plugin is ").nth(1).map_or("", str::trim);
             if !folder.is_empty() && !gone(roots, &folder, at) {
                 last.refused.push(Refused { folder: folder.clone(), name: name.to_string(), version: Some(version.trim_end_matches(')').to_string()),
                     why: format!("RED4ext refused to load it at your last launch ({}): it's built for {} game version.", last.when, older(runtime, exe)), near: false });
@@ -518,7 +518,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, ent
 
     let plugin_logs = roots.iter().filter_map(|r| resolve(r, "red4ext/plugins")).flat_map(|d| files(&d)).filter(|d| d.is_dir()).flat_map(|d| files(&d));
     let mut sources: Vec<PathBuf> = logs.iter().cloned().chain(plugin_logs).collect();
-    sources.sort_by_key(|p| (log_name(&name(p)).is_none_or(|(w, _)| !w.eq_ignore_ascii_case("red4ext")), p.clone()));   // RED4ext's own first
+    sources.sort_by_cached_key(|p| (log_name(&name(p)).is_none_or(|(w, _)| !w.eq_ignore_ascii_case("red4ext")), p.clone()));   // RED4ext's own first
     let mut per: BTreeMap<String, (usize, String)> = BTreeMap::new();   // log owner -> (errors, name as shown)
     let mut stale: Vec<(String, Vec<String>, SystemTime)> = vec![];     // ArchiveXL world edits whose target has changed: (.xl, mismatches, log time)
     let mut leftovers: Vec<(String, String, String, SystemTime)> = vec![];   // files a mod's log says are in its way: (path, who, message, log time)
@@ -555,7 +555,7 @@ fn last_launch(roots: &[&Path], exe: &str, framework: &dyn Fn(&str) -> bool, ent
                 if !leftovers.iter().any(|x| x.0 == p) { leftovers.push((p, who, msg, at)) }
                 continue
             }
-            let n = per.entry(who.to_lowercase()).or_insert((0, who.clone()));
+            let n = per.entry(who.to_lowercase()).or_insert_with(|| (0, who.clone()));
             n.0 += 1;
             if n.0 <= 3 && last.errors.len() < 30 && !last.errors.iter().any(|(w, m)| *w == who && *m == msg) { last.errors.push((who, msg)) }
         }
@@ -898,7 +898,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let mut claimed: Vec<String> = vec![];                             // plugin folders that have a row
     for (i, e) in m.entries().enumerate() {
         let fw = i < m.framework.len();
-        let Some(_) = e.detect.iter().find_map(|d| find(d)) else { if fw { state.insert(&e.name, None); } continue };
+        if e.detect.iter().all(|d| find(d).is_none()) { if fw { state.insert(&e.name, None); } continue }
         installed.push(e);
         let version = e.detect.first().and_then(|d| find(d)).filter(|p| p.is_file() && ext(p, &["dll", "exe", "asi"])).and_then(|p| pe_version(&p)).map(|(f, _)| show([f[0], f[1], f[2], 0], 3));
         let folders: Vec<String> = e.detect.iter().filter_map(|d| mod_folder(d)).collect();
@@ -991,7 +991,7 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
         for (w, m) in &l.errors { s += &format!("\terror: {w}: {m}\n") }
     }
     for x in &r.rows {
-        s += &format!("{:?}\t{}\t{}\t{}\t{}\n", x.status, x.name, x.version.as_deref().unwrap_or("-"), x.why, x.nexus_id.map_or("-".into(), nexus_url));
+        s += &format!("{:?}\t{}\t{}\t{}\t{}\n", x.status, x.name, x.version.as_deref().unwrap_or("-"), x.why, x.nexus_id.map_or_else(|| "-".into(), nexus_url));
         for n in &x.notes { s += &format!("\tnote: {} ({}, {})\n", n.text, n.source, n.date) }
         let take = |(p, k): &(String, Part)| match k { Part::Uses(b) => format!("{p} (builds on {b})"), _ => p.clone() };
         if !x.remove.is_empty() { s += &format!("\tcan remove: {}\n", x.remove.iter().map(take).collect::<Vec<_>>().join(", ")) }
