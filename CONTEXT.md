@@ -46,6 +46,13 @@ A **Mod entry** with the same name as a red mod's own entry, in another mod fold
 A mod whose scripts build on a red mod: they import a module only that mod declares, or use a class or function it defines in a module they import or add to (EquipmentEx's add-ons add to its module). Without the red mod, redscript can't compile the add-on, which stops every script mod, so Remove offers the add-on and its **Companions** with the mod, marked "builds on X". Mods that build on an add-on count too. An import under `@if(ModuleExists(..))` is optional and doesn't count.
 _Avoid_: dependency (a **Dependent mod** depends on a **Framework**)
 
+**Suite core** (planned, v2.0):
+One mod author's shared base that the rest of their mods need: scripts, strings, data or quest content (e.g. DigitalVixen Core, Deceptious Quest Core). Unlike a **Framework**, it's not on the maintainer's low-level list and isn't tied to a Game build. A script core is recognised by its scripts and may carry a version marker, a module a **Suite mod** imports to require that version; an archive core only by its archive, with a fingerprint per version in the **Compatibility manifest**.
+_Avoid_: cross core, core mod
+
+**Suite mod** (planned, v2.0):
+A mod that needs a **Suite core**. It's red when its core is missing, older than it needs, or installed twice; shown grouped under its core.
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine
@@ -89,3 +96,4 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 
 - "update status" / "directed update status" resolved to **Compatibility manifest**.
 - "read-only" (the 2026-10-22 plan) resolved to read-only unless the player asks for a file action (2026-11-04).
+- "cross core" (the 2026-11-08 v2 plan) resolved to **Suite core** and **Suite mod**, since "core mod" isn't a term here and **Framework** means the low-level list.
