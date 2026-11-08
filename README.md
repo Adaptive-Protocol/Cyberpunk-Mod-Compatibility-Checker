@@ -99,6 +99,8 @@ Every scan compares your backups with the mods installed now. A backup counts as
 
 The app then opens **Updated mods detected**, which lists each obsolete backup with the newer file that replaced it, all ticked. **Delete the obsolete versions?** asks a second time before it deletes the ticked backups for good. Only the backups are deleted, never your installed mods. **Not now** keeps them, and a banner with **Review…** stays until you decide. The window opens again only when another backup becomes obsolete. An obsolete backup can't be restored, since that would put the old version back beside the new one. If Vortex installed your mods, it keeps its own copy of every version, so remove old versions in Vortex too.
 
+![Updated mods detected, listing three obsolete backups with the newer files that replaced them](docs/screenshots/v1.5.0/1-popup.png)
+
 ## The compatibility list
 
 The list is [`compat.toml`](compat.toml). It holds the game builds it covers, the frameworks with the lowest working version per build, and the mods that lean on them, with any known problems and where each report came from. It's built into every release.
