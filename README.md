@@ -19,6 +19,7 @@ To have it check before every launch, see [Checking before every launch](#checki
 - It compares them with a curated list of the lowest framework versions that work on each game build, the mods that depend on them, and known problems. The list is updated after game patches (see [The compatibility list](#the-compatibility-list)).
 - Each framework, and each mod that depends on one, gets a verdict: red (likely to break), gray (not confirmed for your build yet) or green (OK). Each comes with the reason and **Open on Nexus** for the update. Other mods appear only when something is wrong with them (see [Which mods it shows](#which-mods-it-shows)).
 - If you ask, it backs up and removes a broken mod until its update arrives, then restores it. It lists every file before changing anything.
+- Each scan also checks those backups. When a newer version of a backed-up mod is installed, it shows **Updated mods detected** and asks whether to delete the obsolete versions.
 - With one line in Steam's launch options, it checks every time you press Play. The game starts at once when nothing is red. Otherwise the app shows what's wrong and waits for you.
 
 ## Download
@@ -91,6 +92,14 @@ Red mods have a **Remove…** button, and **Remove all…** takes every removabl
 - **Delete permanently…** asks a second time, then deletes them for good.
 
 The **Backups** window (top left) lists your backups, with the full path of the folder they're kept in and **Open folder** to see it in your file manager. The Remove window shows the same path before anything moves. **Restore** puts a mod back once it's updated, and never overwrites files that have been installed again since. If you've installed the update already, **Delete…** removes the old backup for good, after showing what it holds. Windows may refuse a change, for example while the game is running or when the game is under Program Files. The app then says so, and nothing is changed.
+
+### Updated mods detected
+
+Every scan compares your backups with the mods installed now. A backup counts as obsolete when the same mod folder holds a newer file or folder with the same name, or the same name with another version in it (`IAC 2.31 - Road.xl` replaced by `IAC 2.5 - Road.xl`). Newer means modified later and not an identical copy. The dates decide, not the numbers, since authors number versions differently. Mods in Mod Organizer 2 count too.
+
+The app then opens **Updated mods detected**, which lists each obsolete backup with the newer file that replaced it, all ticked. **Delete the obsolete versions?** asks a second time before it deletes the ticked backups for good. Only the backups are deleted, never your installed mods. **Not now** keeps them, and a banner with **Review…** stays until you decide. The window opens again only when another backup becomes obsolete. An obsolete backup can't be restored, since that would put the old version back beside the new one. If Vortex installed your mods, it keeps its own copy of every version, so remove old versions in Vortex too.
+
+![Updated mods detected, listing three obsolete backups with the newer files that replaced them](docs/screenshots/v1.5.0/1-popup.png)
 
 ## The compatibility list
 

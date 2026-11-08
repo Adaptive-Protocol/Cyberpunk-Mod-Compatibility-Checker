@@ -1,5 +1,6 @@
 //! The compatibility manifest, the install scan and the verdicts.
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
+use crate::remove::Backup;
 use serde::Deserialize;
 use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
 
@@ -819,6 +820,50 @@ fn vanilla(game: &Path, want: &[u64]) -> BTreeMap<u64, i64> {
     v
 }
 
+/// A mod entry's name without any version in it: "archive/pc/mod/IAC 2.31 - Basilisk.xl" -> "archive/pc/mod|.xl|iac basilisk".
+/// None if the name is nothing but a version.
+fn base(u: &str) -> Option<String> {
+    let (dir, file) = u.rsplit_once('/').unwrap_or(("", u));
+    let low = file.to_lowercase();
+    let ext = [".archive.xl", ".xl", ".archive", ".reds", ".asi", ".yaml", ".yml", ".tweak"].into_iter().find(|e| low.ends_with(e)).unwrap_or("");
+    let words: Vec<&str> = low[..low.len() - ext.len()].split(|c: char| !c.is_alphanumeric() && c != '.').map(|t| t.trim_matches('.'))
+        .filter(|t| !t.is_empty() && !t.strip_prefix('v').unwrap_or(t).split('.').all(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))).collect();
+    (!words.is_empty()).then(|| format!("{}|{ext}|{}", dir.to_lowercase(), words.join(" ")))
+}
+
+/// When a file, or the newest file in a folder, was last modified.
+fn newest(p: &Path) -> Option<SystemTime> {
+    let m = fs::symlink_metadata(p).ok()?;
+    if !m.is_dir() { return m.modified().ok() }
+    let mut t = None;
+    walk(p, 0, &mut |f: PathBuf| t = t.max(fs::metadata(f).and_then(|m| m.modified()).ok()));
+    t
+}
+
+/// Two files with the same bytes (only read when their sizes match and they're under 64 MB).
+fn same(a: &Path, b: &Path) -> bool {
+    let len = |p: &Path| fs::symlink_metadata(p).ok().filter(fs::Metadata::is_file).map(|m| m.len());
+    matches!((len(a), len(b)), (Some(x), Some(y)) if x == y && x < 64 << 20) && read(a, 64 << 20) == read(b, 64 << 20)
+}
+
+/// A **Backup** whose mod has a newer version installed: each backed-up entry that has one, with the installed entry.
+pub struct Updated { pub backup: Backup, pub newer: Vec<(String, String)> }
+
+/// The backups whose mods were updated since: an entry in the same mod folder with the same name, or the same name with
+/// another version in it (IAC 2.31 -> IAC 2.5), is installed, modified later and not a copy of the backed-up file.
+/// Dates, not the numbers in names, tell which is newer: authors number versions differently (2.31 came before 2.5).
+fn updated(roots: &[&Path], entries: &[Vec<String>], backups: Vec<Backup>) -> Vec<Updated> {
+    let have: Vec<(usize, &String, String)> = entries.iter().enumerate().flat_map(|(r, l)| l.iter().filter_map(move |u| Some((r, u, base(u)?)))).collect();
+    backups.into_iter().filter_map(|b| {
+        let newer: Vec<(String, String)> = b.paths.iter().filter_map(|p| {
+            let (k, was, old) = (base(p)?, b.dir.join(p), newest(&b.dir.join(p))?);
+            have.iter().find(|(r, u, hk)| *hk == k && newest(&roots[*r].join(u)).is_some_and(|t| t > old) && !same(&roots[*r].join(u), &was))
+                .map(|(_, u, _)| (p.clone(), (*u).clone()))
+        }).collect();
+        (!newer.is_empty()).then_some(Updated { backup: b, newer })
+    }).collect()
+}
+
 /// What the scan needs from outside the game folder.
 pub struct Env {
     pub vc: Option<Option<String>>,     // see vc_runtime
@@ -857,6 +902,8 @@ pub struct Report {
     pub unlisted: Vec<String>,      // native plugins the list doesn't know
     pub last: Option<Last>,         // what the logs say about the last launch
     pub crash_reporter: bool,       // Advanced Crash Reporter is installed: without it no crash is ever seen
+    pub updated: Vec<Updated>,      // backups whose mods have a newer version installed
+    pub vortex: bool,               // Vortex deployed mods into the game folder
 }
 
 /// Advanced Crash Reporter's Nexus mod ID, for the note shown when it isn't installed.
@@ -1046,7 +1093,9 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     unlisted.sort_by_key(|n| n.to_lowercase());
     unlisted.dedup();
     let crash_reporter = ["bin/x64/plugins/AdvancedCrashReporter.asi", "bin/x64/plugins/AdvancedCrashReporter"].iter().any(|p| find(p).is_some());
-    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter })
+    let updated = updated(&roots, &entries, crate::remove::list(game));
+    let vortex = ["", "archive/pc/mod"].iter().filter_map(|d| resolve(game, d)).flat_map(|d| files(&d)).any(|f| name(&f).to_lowercase().starts_with("vortex.deployment"));
+    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter, updated, vortex })
 }
 
 /// Plain-text report, for `--report` and the tests.
@@ -1070,6 +1119,10 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
         if !x.mo2.is_empty() { s += &format!("\tin Mod Organizer 2: {}\n", x.mo2.join(", ")) }
     }
     if !r.unlisted.is_empty() { s += &format!("Unlisted native plugins: {}\n", r.unlisted.join(", ")) }
+    for u in &r.updated {
+        s += &format!("Updated since its backup: {} ({})\n", u.backup.name, u.backup.dir.display());
+        for (old, new) in &u.newer { s += &format!("\t{old} -> {new}\n") }
+    }
     s
 }
 
@@ -1686,5 +1739,37 @@ mod tests {
         assert_eq!(error_line("[2026-11-04 02:57:37.735] [error   ] [ 75516] [NCA Wardrobe Guard] guard disabled"), Some((Some("NCA Wardrobe Guard"), "guard disabled")));
         assert_eq!(error_line("[2026-11-04 03:10:45.789] [37264] [info] ArchiveXL 1.28.6 is starting..."), None);
         assert_eq!(error_line("no brackets [error] here"), None);
+    }
+
+    #[test]
+    fn updated_since_the_backup() {
+        assert_eq!(base("archive/pc/mod/IAC 2.31 - Basilisk.xl").as_deref(), Some("archive/pc/mod|.xl|iac basilisk"));
+        assert_eq!(base("archive/pc/mod/Judy_Cleaned_v2.0.xl"), base("archive/pc/mod/judy_cleaned.xl"));
+        assert_ne!(base("archive/pc/mod/A.xl"), base("archive/pc/mod/A.archive"));
+        assert_eq!(base("r6/scripts/v1.2"), None);
+        let g = install("updated", [2, 5, 0, 0], &[("archive/pc/mod/Same.xl", None), ("archive/pc/mod/IAC 2.31 - Road.xl", None), ("r6/tweaks/Old/t.yaml", None),
+            ("archive/pc/mod/Again.xl", None), ("archive/pc/mod/Gone.xl", None)]);
+        let old = SystemTime::now() - Duration::from_secs(86_400);
+        for f in ["archive/pc/mod/Same.xl", "archive/pc/mod/IAC 2.31 - Road.xl", "r6/tweaks/Old/t.yaml", "archive/pc/mod/Again.xl"] {
+            fs::File::options().write(true).open(g.join(f)).unwrap().set_modified(old).unwrap();
+        }
+        for (n, p) in [("Same", "archive/pc/mod/Same.xl"), ("IAC", "archive/pc/mod/IAC 2.31 - Road.xl"), ("Old", "r6/tweaks/Old"), ("Again", "archive/pc/mod/Again.xl"), ("Gone", "archive/pc/mod/Gone.xl")] {
+            crate::remove::backup(&g, n, "", &[p.to_string()]).unwrap();
+        }
+        fs::write(g.join("archive/pc/mod/Same.xl"), "new").unwrap();                     // updated under the same name
+        fs::write(g.join("archive/pc/mod/IAC 2.5 - Road.xl"), "2.5").unwrap();           // another version in the name
+        fs::write(g.join("archive/pc/mod/Gone 2.xl"), "").unwrap();                      // older than the backed-up copy: not an update
+        fs::File::options().write(true).open(g.join("archive/pc/mod/Gone 2.xl")).unwrap().set_modified(old - Duration::from_secs(86_400)).unwrap();
+        fs::create_dir_all(g.join("r6/tweaks/Old")).unwrap();
+        fs::write(g.join("r6/tweaks/Old/t.yaml"), "new").unwrap();
+        fs::write(g.join("archive/pc/mod/Again.xl"), "").unwrap();                       // the same file installed again, dated today
+        fs::write(g.join("archive/pc/mod/Again.archive"), "").unwrap();                  // same name, another kind of entry
+        let r = scan(&Manifest::parse(LIST).unwrap(), &g, &[], &NO_ENV).unwrap();
+        let mut got: Vec<(&str, Vec<(String, String)>)> = r.updated.iter().map(|u| (u.backup.name.as_str(), u.newer.clone())).collect();
+        got.sort();
+        let pair = |a: &str, b: &str| vec![(a.to_string(), b.to_string())];
+        assert_eq!(got, vec![("IAC", pair("archive/pc/mod/IAC 2.31 - Road.xl", "archive/pc/mod/IAC 2.5 - Road.xl")),
+                             ("Old", pair("r6/tweaks/Old", "r6/tweaks/Old")), ("Same", pair("archive/pc/mod/Same.xl", "archive/pc/mod/Same.xl"))]);
+        assert!(text(&r, "", "").contains("Updated since its backup: IAC") && !r.vortex);
     }
 }
