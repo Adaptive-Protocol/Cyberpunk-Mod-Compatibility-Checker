@@ -19,7 +19,7 @@ const LIST: &str = "backup.toml";
 pub struct Backup { pub name: String, pub why: String, pub date: String, pub paths: Vec<String>, #[serde(skip)] pub dir: PathBuf }
 
 /// "2026-11-04" for a number of days since 1970-01-01 (H. Hinnant's civil-from-days).
-fn date(days: i64) -> String {
+pub fn date(days: i64) -> String {
     let (era, doe) = ((days + 719_468).div_euclid(146_097), (days + 719_468).rem_euclid(146_097));
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);

@@ -14,6 +14,9 @@
 #             in `all` is installed and none in `none` is. `build` limits it to one game build. Each has text, source and date.
 #             `remove` lists the mod entries the app may offer to back up or delete for it (a folder or file directly in a
 #             mod folder); leave it out when the fix isn't a removal.
+#             A path through a mod .archive names a game file inside it, e.g. "archive/pc/mod/*.archive/base/sound/event/eventsmetadata.json":
+#             each archive whose copy is older than the game's own (from the archives' file indexes) gets its own row, which offers
+#             that archive. Versions before 1.4.0 can't look inside archives, so to them such a pattern never matches.
 # Paths may use * within a name, e.g. "archive/pc/mod/OldMod-*.archive".
 #
 # 2026-11-04: seeded from the maintainer's updated 2.5 install, and confirmed by a launch test on it. `min` values are the installed versions
@@ -21,7 +24,7 @@
 # file types and still need checking against each mod page's requirements.
 
 schema = 1
-updated = "2026-11-04"
+updated = "2026-11-08"
 
 [[build]]
 game = "2.5"
@@ -177,3 +180,19 @@ name = "PhotoMode-EX"
 nexus_id = 18839
 detect = ["red4ext/plugins/PhotoModeEx/PhotoModeEx.dll"]
 needs = ["RED4ext"]
+
+# 2026-11-08: two mods built before 2.5 replaced the game's sound index files and muted menu, footstep, tire and ambient
+# sounds on the maintainer's 2.5 install until they were moved out. These files change with most patches.
+[[pattern]]
+name = "Sound index from an older patch"
+all = ["archive/pc/mod/*.archive/base/sound/soundbanks/sfx_container.opusinfo"]
+text = "Built for an older patch: replaces the game's sound index; causes missing sounds."
+source = "maintainer's 2.5 install"
+date = "2026-11-08"
+
+[[pattern]]
+name = "Sound event list from an older patch"
+all = ["archive/pc/mod/*.archive/base/sound/event/eventsmetadata.json"]
+text = "Built for an older patch: replaces the game's sound index; causes missing sounds."
+source = "maintainer's 2.5 install"
+date = "2026-11-08"

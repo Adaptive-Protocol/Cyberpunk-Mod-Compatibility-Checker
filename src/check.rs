@@ -1,7 +1,7 @@
 //! The compatibility manifest, the install scan and the verdicts.
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use serde::Deserialize;
-use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::Read, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
+use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
 
 pub const BUILT_IN: &str = include_str!("../compat.toml");
 /// The built-in list, parsed once.
@@ -41,7 +41,7 @@ pub struct Entry {
 pub struct Note { pub build: String, pub text: String, pub source: String, pub date: String }
 
 /// A known clash between files, such as an old version left behind next to its replacement: red when every path in
-/// `all` is installed and none in `none` is.
+/// `all` is installed and none in `none` is. A path through an .archive names a game file inside it (see `inner`).
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct Pattern {
@@ -106,6 +106,39 @@ fn read(path: &Path, cap: u64) -> Option<Vec<u8>> {
     let mut b = vec![];
     fs::File::open(path).ok()?.take(cap).read_to_end(&mut b).ok()?;
     Some(b)
+}
+
+/// The game's hash of a path inside an .archive: FNV-1a 64 of the lowercase path with backslashes.
+fn hash(p: &str) -> u64 { p.to_lowercase().replace('/', "\\").bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)) }
+
+/// A game file inside archives: (their folder, a glob for their names, the file's hash).
+type Inner = (String, String, u64);
+
+/// A pattern path through an .archive, naming a game file inside it: "archive/pc/mod/*.archive/base/x.json" ->
+/// ("archive/pc/mod", "*.archive", hash of "base\x.json"). Before 1.4.0 the app saw no such file, so the pattern never matched.
+fn inner(p: &str) -> Option<Inner> {
+    let p = p.replace('\\', "/");
+    let i = p.to_ascii_lowercase().find(".archive/")? + 8;
+    let (dir, glob) = p[..i].rsplit_once('/')?;
+    Some((dir.to_string(), glob.to_string(), hash(&p[i + 1..])))
+}
+
+/// When an .archive's copies of the files in `want` were packed (FILETIME), from its file index; nothing is unpacked.
+/// The index sits where the header's u64 at byte 8 points: 28 bytes with the file count at 16, then 56 bytes per file,
+/// starting with the path's hash and the time.
+fn packed(p: &Path, want: &[u64]) -> Option<Vec<(u64, i64)>> {
+    let (mut f, mut h) = (fs::File::open(p).ok()?, [0; 28]);
+    f.read_exact(&mut h[..16]).ok()?;
+    if &h[..4] != b"RDAR" { return None }
+    f.seek(SeekFrom::Start(u64::from_le_bytes(h[8..16].try_into().ok()?))).ok()?;
+    f.read_exact(&mut h).ok()?;
+    let mut r = BufReader::new(f.take(u64::from(u32::from_le_bytes(h[16..20].try_into().ok()?)) * 56));
+    let (mut e, mut v) = ([0; 56], vec![]);
+    while r.read_exact(&mut e).is_ok() {
+        let k = u64::from_le_bytes(e[..8].try_into().ok()?);
+        if want.contains(&k) { v.push((k, i64::from_le_bytes(e[8..16].try_into().ok()?))) }
+    }
+    Some(v)
 }
 
 /// "1.28.6.58207" -> [1, 28, 6, 58207]; anything that isn't a digit separates parts.
@@ -775,6 +808,17 @@ fn vc_runtime() -> Option<Option<String>> {
     pe_version(&dll).map(|(f, _)| Some(show(f, 3)))
 }
 
+/// When the game's own newest copy of each file in `want` was packed: hash -> FILETIME.
+fn vanilla(game: &Path, want: &[u64]) -> BTreeMap<u64, i64> {
+    let mut v = BTreeMap::new();
+    for (k, t) in ["archive/pc/content", "archive/pc/ep1"].iter().filter_map(|d| resolve(game, d)).flat_map(|d| files(&d))
+        .filter(|p| ext(p, &["archive"])).filter_map(|p| packed(&p, want)).flatten() {
+        let e = v.entry(k).or_insert(t);
+        *e = (*e).max(t);
+    }
+    v
+}
+
 /// What the scan needs from outside the game folder.
 pub struct Env {
     pub vc: Option<Option<String>>,     // see vc_runtime
@@ -951,11 +995,39 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         let (remove, mo2) = if whole { pieces(std::slice::from_ref(&r.folder), if r.near { Kin::Beside } else { Kin::Any }) } else { (vec![], vec![]) };
         rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2 });
     }
+    // Patterns that look inside mod archives: each archive's index is read once, and the game's own copies only if one holds a file
+    let looks: Vec<Inner> = m.pattern.iter().flat_map(|p| &p.all).filter_map(|x| inner(x)).collect();
+    let at = |rel: &str, (d, g, _): &Inner| rel.rsplit_once('/').is_some_and(|(pd, f)| pd.eq_ignore_ascii_case(d) && wild(g, f));
+    let want: Vec<u64> = looks.iter().map(|l| l.2).collect();
+    let mut held = vec![];                                             // (root, archive, the files it holds and when each was packed)
+    for (r, root) in roots.iter().enumerate() {
+        for p in looks.iter().filter_map(|l| resolve(root, &l.0)).collect::<HashSet<_>>().into_iter().flat_map(|d| files(&d)) {
+            let Ok(rel) = p.strip_prefix(root).map(|x| x.to_string_lossy().replace('\\', "/")) else { continue };
+            if looks.iter().any(|l| at(&rel, l)) && let Some(got) = packed(&p, &want).filter(|g| !g.is_empty()) { held.push((r, rel, got)) }
+        }
+    }
+    let ours = if held.is_empty() { BTreeMap::new() } else { vanilla(game, &want) };
+    let mut flagged: Vec<(usize, &str)> = vec![];
     for p in m.pattern.iter().filter(|p| p.build.as_deref().is_none_or(|pb| build.as_deref().is_some_and(|b| cmp_ver(pb, b).is_eq()))) {
-        if p.all.iter().all(|x| find(x).is_some()) && !p.none.iter().any(|x| find(x).is_some()) {
+        if !p.all.iter().all(|x| inner(x).is_some() || find(x).is_some()) || p.none.iter().any(|x| find(x).is_some()) { continue }
+        let deep: Vec<Inner> = p.all.iter().filter_map(|x| inner(x)).collect();
+        if deep.is_empty() {
             let (remove, mo2) = pieces(&p.remove, Kin::No);
             rows.push(Row { name: p.name.clone(), nexus_id: p.nexus_id, version: None, status: Red, notes: vec![], remove, mo2,
                             why: format!("{} ({}, {})", p.text, p.source, p.date) });
+            continue
+        }
+        // each archive whose copy of every such file is older than the game's own: made for an earlier patch
+        for (r, rel, got) in &held {
+            let old = |l: &Inner| { let (t, v) = (got.iter().find(|x| x.0 == l.2)?.1, *ours.get(&l.2)?); (at(rel, l) && t > 0 && t < v).then_some((t, v)) };
+            let Some(old) = deep.iter().map(old).collect::<Option<Vec<_>>>() else { continue };
+            if flagged.contains(&(*r, rel.as_str())) { continue }
+            flagged.push((*r, rel));
+            let day = |t: i64| crate::remove::date(t / 864_000_000_000 - 134_774);       // FILETIME counts 100 ns from 1601
+            let (remove, mo2) = pieces(std::slice::from_ref(rel), Kin::Any);
+            let file = rel.rsplit('/').next().unwrap_or(rel);
+            rows.push(Row { name: file.rsplit_once('.').map_or(file, |x| x.0).to_string(), nexus_id: None, version: None, status: Red, notes: vec![], remove, mo2,
+                            why: format!("{} Its copy is from {}, the game's from {} ({}, {}).", p.text, day(old[0].0), day(old[0].1), p.source, p.date) });
         }
     }
     rows.sort_by_key(|r| (r.status, r.name.to_lowercase()));
@@ -1564,6 +1636,44 @@ mod tests {
         assert!(!hit(&both[..1], [2, 5, 0, 0]));
         assert!(!hit(&[&both[..], &[("archive/pc/mod/keep.txt", None)]].concat(), [2, 5, 0, 0]));
         assert!(!hit(&both, [2, 6, 0, 0]), "a pattern for 2.5 doesn't apply to 2.6");
+    }
+
+    /// A minimal .archive: its header and file index, with each file's path and the day (since 1970) it was packed.
+    fn rdar(files: &[(&str, i64)]) -> Vec<u8> {
+        let mut b = [&b"RDAR\x0c\0\0\0"[..], &40u64.to_le_bytes(), &[0; 40], &(files.len() as u32).to_le_bytes(), &[0; 8]].concat();
+        for (p, day) in files { b.extend([&hash(p).to_le_bytes()[..], &((day + 134_774) * 864_000_000_000).to_le_bytes(), &[0; 40]].concat()) }
+        b
+    }
+
+    #[test]
+    fn stale_sound_index() {
+        let (opus, events) = ("base/sound/soundbanks/sfx_container.opusinfo", "base\\sound\\event\\eventsmetadata.json");
+        assert_eq!((hash(opus), hash(events)), (0xb73a_6e17_4edb_0225, 0xd7b9_08a4_d0e7_9997), "the hashes in the game's own index");
+        let (patch, before, after) = (20_741, 20_487, 20_752);     // 2026-10-15 (2.5), 2026-02-03, 2026-10-26
+        let archives: [(&str, Vec<u8>); 8] = [
+            ("archive/pc/content/audio_1_general.archive", rdar(&[(events, patch), ("base/a.ent", patch)])),
+            ("archive/pc/content/audio_2_soundbanks.archive", rdar(&[(opus, patch - 400)])),
+            ("archive/pc/ep1/audio_2_soundbanks.archive", rdar(&[(opus, patch)])),                  // the newest copy is the game's
+            ("archive/pc/mod/###MuteMenuHum.archive", rdar(&[("base/a.ent", 1), (events, 20_156)])),
+            ("archive/pc/mod/##meme_tv.archive", rdar(&[(opus, before), (events, before)])),       // both files: one row
+            ("archive/pc/mod/NewSounds.archive", rdar(&[(events, after)])),                         // made for this patch
+            ("archive/pc/mod/NoDate.archive", rdar(&[(opus, -134_774)])),                           // packed at 0: unknown
+            ("archive/pc/mod/Broken.archive", b"RDAR".to_vec()),
+        ];
+        let files: Vec<(&str, Option<[u16; 4]>)> = archives.iter().map(|a| (a.0, None)).chain([("archive/pc/mod/##meme_tv.archive.xl", None)]).collect();
+        let game = install("sound", [2, 5, 0, 0], &files);
+        let mo2 = install("sound-mo2-Old TV", [0; 4], &[("archive/pc/mod/OldTV.archive", None)]);
+        for (rel, b) in &archives { fs::write(game.join(rel), b).unwrap() }
+        fs::write(mo2.join("archive/pc/mod/OldTV.archive"), rdar(&[(opus, before)])).unwrap();
+        let r = scan(&Manifest::parse(BUILT_IN).unwrap(), &game, std::slice::from_ref(&mo2), &NO_ENV).unwrap();
+        let red: Vec<(&str, &str)> = r.rows.iter().filter(|x| x.status == Status::Red).map(|x| (x.name.as_str(), x.why.as_str())).collect();
+        assert_eq!(red.iter().map(|x| x.0).collect::<Vec<_>>(), ["###MuteMenuHum", "##meme_tv", "OldTV"]);
+        assert_eq!(red[1].1, "Built for an older patch: replaces the game's sound index; causes missing sounds. Its copy is from 2026-02-03, \
+            the game's from 2026-10-15 (maintainer's 2.5 install, 2026-11-08).");
+        let tv = &r.rows[1];
+        assert_eq!(tv.remove, [("archive/pc/mod/##meme_tv.archive".to_string(), Part::Own), ("archive/pc/mod/##meme_tv.archive.xl".into(), Part::Kin)]);
+        assert!(r.rows[2].remove.is_empty() && r.rows[2].mo2 == [name(&mo2)], "MO2's files are left to MO2");
+        assert!(resolve(&game, "archive/pc/mod/*.archive/base/sound/event/eventsmetadata.json").is_none(), "older versions never match such a path");
     }
 
     #[test]

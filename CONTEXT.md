@@ -30,7 +30,7 @@ The game's most recent run, as its logs record it: RED4ext's log, redscript's lo
 A file in bin/x64 that loads a **Framework**: RED4ext's winmm.dll, or the ASI loader version.dll that loads CET and .asi plugins. Listed as the Framework's `parts`.
 
 **Pattern**:
-A known clash between files, kept in the **Compatibility manifest** and checked on every scan: red when all its paths are installed and none of its `none` paths are. Its optional `remove` names what the app may offer to remove.
+A known clash between files, kept in the **Compatibility manifest** and checked on every scan: red when all its paths are installed and none of its `none` paths are. Its optional `remove` names what the app may offer to remove. A path through an archive (`archive/pc/mod/*.archive/<game file>`) instead flags each mod archive whose copy of that game file is older than the game's own, such as a sound index from an older patch, read from the archives' file indexes.
 
 **Mod entry**:
 A whole folder or file directly inside a mod folder (archive/pc/mod, r6/scripts, r6/tweaks, red4ext/plugins, CET's mods, REDmod's mods, or an .asi in bin/x64/plugins). The only thing the app may move or delete.
