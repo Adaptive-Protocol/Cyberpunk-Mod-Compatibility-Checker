@@ -15,12 +15,12 @@ const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO
     It changes files only when you ask: Back up and remove moves a broken mod into _mod_backups in your game folder, \
     and Delete removes it for good. Both show every file first, and neither touches the game's own files or the frameworks.\n\n\
     The compatibility list is curated by the maintainer and built into each release. A newer compat.toml placed next to the app is used instead. \
-    Besides your mods, the app reads the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) \
+    Besides your mods (for archives, only their file index), the app reads the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) \
     and, on Windows, the version of the Visual C++ runtime.\n\n\
     Crash and freeze reports come from Advanced Crash Reporter by Akiway (nexusmods.com/cyberpunk2077/mods/34403), when it's installed. \
     The app only reads them; none of its code is used.\n\n\
     Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch \
-    and the rows with coloured status circles. Framework background from the RED Modding wiki (wiki.redmodding.org). \
+    and the rows with coloured status circles. Framework background from the RED Modding wiki (wiki.redmodding.org). The .archive file index layout as documented in WolvenKit (github.com/WolvenKit/WolvenKit); no code was copied. \
     Backing a mod up instead of deleting it follows the reversible disable in mod managers such as Vortex and Mod Organizer 2, \
     and the confirmation that lists every file comes from the maintainer's Nexus Mod Duplication Cleanup. \
     The verdicts, list format and layout are this app's own.\n\n\
@@ -159,7 +159,7 @@ impl App {
                     for x in &list {
                     ui.horizontal(|ui| {
                         dot(ui, color(s), &x.why);
-                        cell(ui, 190.0, |ui| ui.label(RichText::new(&x.name).strong()));
+                        cell(ui, 190.0, |ui| ui.add(egui::Label::new(RichText::new(&x.name).strong()).truncate()));   // a long archive name is cut, in full on hover
                         cell(ui, 60.0, |ui| ui.weak(x.version.as_deref().unwrap_or("")));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if !x.remove.is_empty() {

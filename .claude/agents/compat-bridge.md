@@ -76,6 +76,8 @@ Turn what you find into notes or patterns (B, C, E). Propose `confirmed = true` 
 ### E. Patterns
 `all` holds the paths that must all be present, `none` the paths whose presence clears it, `build` the game build it applies to, then one plain sentence of `text` with `source` and `date`. Use `*` for version numbers in file names. `remove` lists mod entries (a folder or file directly in a mod folder), never a framework, its loader or a game file.
 
+A path through an archive, such as `archive/pc/mod/*.archive/base/sound/event/eventsmetadata.json`, flags each mod archive that replaces that game file with a copy older than the game's own (from the archives' file indexes; the app shows one row per archive and offers it, so leave out `remove`). Use it for a game file that changes with each patch and silently breaks mods that ship an old copy, such as the sound index files. Apps before 1.4.0 ignore such a pattern, so the file stays readable for them.
+
 ## Finish
 1. Set `updated` to today and run `cargo test --release` (`built_in_list_is_valid` parses the file).
 2. Write `STATUS.md`: a short, paste-ready "What's safe on patch <build>" for the Nexus page, listing frameworks updated, frameworks not updated yet, and known mod problems with their sources. End it with "Researched by a Claude agent and reviewed by the maintainer."
