@@ -61,7 +61,11 @@ _Avoid_: disable, uninstall, quarantine
 A folder `_mod_backups/<date> <mod>/` in the game folder that holds the moved **Mod entries** at their original paths, plus backup.toml (name, why, date, paths).
 
 **Restore**:
-Moving a **Backup**'s entries back into the game folder. It's refused if any of them has been installed again.
+Moving a **Backup**'s entries back into the game folder. It's refused if any of them has been installed again, and not offered for an **Obsolete backup**.
+
+**Obsolete backup**:
+A **Backup** whose mod has a newer version installed: a **Mod entry** in the same mod folder with the same name, or the same name with another version number in it, modified later than the backed-up copy and not identical to it. Each scan looks for them and, under "Updated mods detected", offers to delete them. Dates decide, not the numbers in names.
+_Avoid_: old backup, stale backup
 
 **Delete**:
 Permanently removing ticked **Mod entries** after a second confirmation, or removing a **Backup**.

@@ -13,7 +13,8 @@ const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
 const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), " by FauxNoodles on Nexus Mods, MIT license. \
     It never connects to the internet: \"Open on Nexus\" hands the mod's page to your own web browser. \
     It changes files only when you ask: Back up and remove moves a broken mod into _mod_backups in your game folder, \
-    and Delete removes it for good. Both show every file first, and neither touches the game's own files or the frameworks.\n\n\
+    and Delete removes it for good. Both show every file first, and neither touches the game's own files or the frameworks. \
+    Each scan also checks your backups: when a newer version of a backed-up mod is installed, it offers to delete the obsolete backup.\n\n\
     The compatibility list is curated by the maintainer and built into each release. A newer compat.toml placed next to the app is used instead. \
     Besides your mods (for archives, only their file index), the app reads the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) \
     and, on Windows, the version of the Visual C++ runtime.\n\n\
@@ -33,6 +34,10 @@ const REMOVE_INFO: &str = "Back up and remove moves the ticked items into _mod_b
     so the Backups window can put them back once the mod is updated. Close the game first.";
 const BACKUPS_INFO: &str = "Mods you backed up and removed, kept in _mod_backups in your game folder. Restore puts one back. \
     If you've installed an update since, delete its backup instead.";
+const UPDATED_INFO: &str = "A newer version of these mods is installed, so their backups in _mod_backups are obsolete and only take up space. \
+    Untick any you want to keep.";
+const VORTEX_NOTE: &str = "Vortex keeps its own copy of each version it installs: to free that space too, remove the old versions in Vortex.";
+const UPDATED_TIP: &str = "A newer version is installed, so restoring this would put the old one back beside it. Delete the backup instead.";
 const UNLISTED_TIP: &str = "Native plugins hook the game directly and often break after a patch. These aren't in the compatibility list.";
 
 type Job = JoinHandle<Result<Report, String>>;
@@ -52,6 +57,8 @@ struct App {
     removal: Option<Removal>,
     backups: Option<Vec<remove::Backup>>,   // the Backups window, while open
     discard: Option<PathBuf>,            // the backup waiting for "Delete for good"
+    obsolete: Option<(Vec<(PathBuf, bool)>, bool)>,   // Updated mods detected: (each backup, ticked), and whether "Yes, delete" was pressed
+    asked: Vec<PathBuf>,                 // the backups it last opened for, so a rescan reopens it only for new ones
     n_backups: usize,
     notice: Option<(bool, String)>,      // (succeeded, what happened) after a file action
     launch: Option<Arc<AtomicBool>>,     // --launch: set to start the game once the window closes
@@ -67,7 +74,7 @@ impl App {
         if mo2.is_empty() && let Some(m) = locate::find_mo2(Path::new(&game)) { mo2 = m.display().to_string() }
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
         let mut app = Self { game, mo2, filter: String::new(), list, source, warning, report: None, job: None, theme: None,
-                             removal: None, backups: None, discard: None, n_backups: 0, notice: None, auto: launch.is_some(), launch };
+                             removal: None, backups: None, discard: None, obsolete: None, asked: vec![], n_backups: 0, notice: None, auto: launch.is_some(), launch };
         app.rescan();
         app
     }
@@ -87,6 +94,11 @@ impl App {
         if self.job.as_ref().is_some_and(JoinHandle::is_finished) {
             self.report = Some(self.job.take().unwrap().join().unwrap_or_else(|_| Err("The scan stopped unexpectedly.".into())));
             self.n_backups = match &self.report { Some(Ok(r)) => remove::list(&r.game).len(), _ => 0 };
+            if let Some(Ok(r)) = &self.report {                  // after every scan: open Updated mods detected for backups not offered yet
+                let dirs: Vec<PathBuf> = r.updated.iter().map(|u| u.backup.dir.clone()).collect();
+                if dirs.iter().any(|d| !self.asked.contains(d)) { self.obsolete = Some((ticks(r), false)) }
+                self.asked = dirs;
+            }
         }
     }
 
@@ -255,6 +267,47 @@ impl App {
         self.rescan();
     }
 
+    /// Updated mods detected: deletes the backups of mods that have a newer version installed, once the user says yes twice.
+    fn updates_dialog(&mut self, ctx: &egui::Context) {
+        let (Some((mut ticked, mut sure)), Some(Ok(r))) = (self.obsolete.take(), &self.report) else { return };
+        let (game, screen, n) = (r.game.clone(), ctx.screen_rect().size(), ticked.iter().filter(|t| t.1).count());
+        let (mut run, mut close) = (false, false);
+        let modal = egui::Modal::new(egui::Id::new("updated")).show(ctx, |ui| {
+            ui.set_width((screen.x - 80.0).clamp(300.0, 900.0));
+            ui.heading("Updated mods detected");
+            ui.label(UPDATED_INFO);
+            if r.vortex { ui.weak(VORTEX_NOTE); }
+            if folder_row(ui, "Kept in", &game) { self.notice = open_folder(&game) }
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height((screen.y - 260.0).clamp(100.0, 340.0)).show(ui, |ui| for u in &r.updated {
+                let Some(t) = ticked.iter_mut().find(|t| t.0 == u.backup.dir) else { continue };
+                ui.checkbox(&mut t.1, RichText::new(format!("{}  ·  backed up {}", u.backup.name, u.backup.date)).strong()).on_hover_text(&u.backup.why);
+                for p in &u.backup.paths {
+                    let new = u.newer.iter().find(|x| x.0 == *p).map_or(String::new(), |(_, n)| format!("  ·  newer installed: {}", n.rsplit('/').next().unwrap_or(n)));
+                    ui.horizontal(|ui| { ui.add_space(24.0); ui.add(egui::Label::new(RichText::new(format!("{p}{new}")).monospace()).truncate()) });
+                }
+            });
+            ui.separator();
+            ui.horizontal(|ui| if sure {
+                ui.colored_label(BAD, format!("Delete {} for good? This can't be undone.", count(n, "backup")));
+                run = ui.add_enabled(n > 0, egui::Button::new(RichText::new("Delete for good").color(BAD))).clicked();
+                if ui.button("Back").clicked() { sure = false }
+            } else {
+                ui.label(RichText::new("Delete the obsolete versions?").strong());
+                sure = ui.add_enabled(n > 0, egui::Button::new("Yes, delete…")).clicked();
+                close = ui.button("Not now").clicked();
+            });
+        });
+        if !run { if !close && !modal.should_close() { self.obsolete = Some((ticked, sure)) } return }
+        let (mut done, mut failed) = (vec![], vec![]);
+        for b in r.updated.iter().map(|u| &u.backup).filter(|b| ticked.iter().any(|t| t.1 && t.0 == b.dir)) {
+            match remove::discard(&game, b) { Ok(()) => done.push(b.name.clone()), Err(e) => failed.push(format!("{}: {e}", b.name)) }
+        }
+        let head = (!done.is_empty()).then(|| format!("Deleted the obsolete {} of {}.", if done.len() == 1 { "backup" } else { "backups" }, done.join(", ")));
+        self.notice = Some((failed.is_empty(), head.into_iter().chain(failed).collect::<Vec<_>>().join("\n")));
+        self.rescan();
+    }
+
     /// Backups: restore a backed-up mod, or delete its backup.
     fn backups_window(&mut self, ctx: &egui::Context) {
         let (Some(list), Some(Ok(r))) = (&self.backups, &self.report) else { return };
@@ -267,15 +320,18 @@ impl App {
             if list.is_empty() { ui.label("No backups."); }
             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| for b in list {
                 let asked = self.discard.as_ref() == Some(&b.dir);
+                let updated = r.updated.iter().any(|u| u.backup.dir == b.dir);
                 ui.horizontal(|ui| {
                     ui.weak(&b.date);
                     ui.label(RichText::new(&b.name).strong()).on_hover_text(format!("{}\n\n{}\n\nIn {}", b.why, b.paths.join("\n"), b.dir.display()));
+                    if updated { ui.weak("newer version installed").on_hover_text(UPDATED_TIP); }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| if asked {
                         if ui.small_button("Keep").clicked() { self.discard = None }
                         if ui.small_button(RichText::new("Delete for good").color(BAD)).clicked() { act = Some((b.clone(), false)) }
                     } else {
                         if ui.small_button("Delete…").on_hover_text("Deletes this backup for good").clicked() { self.discard = Some(b.dir.clone()) }
-                        if ui.small_button("Restore").on_hover_text("Moves its files back into the game folder").clicked() { act = Some((b.clone(), true)) }
+                        if ui.add_enabled(!updated, egui::Button::new("Restore").small()).on_hover_text("Moves its files back into the game folder")
+                            .on_disabled_hover_text(UPDATED_TIP).clicked() { act = Some((b.clone(), true)) }
                     });
                 });
                 if asked {
@@ -295,7 +351,7 @@ impl App {
             let fresh = remove::list(&game);
             self.n_backups = fresh.len();
             self.backups = Some(fresh);
-            if restore { self.rescan() }
+            self.rescan();                                      // the Updated mods list follows the backups
         }
         if !open { self.backups = None; self.discard = None }
     }
@@ -357,6 +413,8 @@ fn open(p: &Path, dir: bool) -> Option<(bool, String)> {
     let with = if cfg!(windows) { "explorer" } else { "xdg-open" };
     Command::new(with).arg(p).spawn().err().map(|e| (false, format!("Couldn't open {} with {with}: {e}", p.display())))
 }
+/// Every backup in Updated mods detected, ticked.
+fn ticks(r: &Report) -> Vec<(PathBuf, bool)> { r.updated.iter().map(|u| (u.backup.dir.clone(), true)).collect() }
 fn reds(r: &Report) -> usize { r.rows.iter().filter(|x| x.status == Status::Red).count() }
 
 /// The game folder a launch command points into, e.g. Steam's `...\Cyberpunk 2077\REDprelauncher.exe`.
@@ -468,6 +526,14 @@ impl eframe::App for App {
                 ui.horizontal(|ui| { ui.colored_label(if *ok { OK } else { BAD }, t); seen = ui.small_button("OK").clicked() });
             }
             if seen { self.notice = None }
+            if let Some(Ok(r)) = &self.report && !r.updated.is_empty() && self.obsolete.is_none() {
+                let (n, mut review) = (r.updated.len(), false);
+                egui::Frame::new().fill(Color32::from_rgba_unmultiplied(40, 160, 70, 40)).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Updated mods detected: {} {} a newer version installed.", count(n, "backed-up mod"), if n == 1 { "has" } else { "have" })).strong());
+                    review = ui.button("Review…").clicked();
+                }));
+                if review { self.obsolete = Some((ticks(r), false)) }
+            }
             if let Some(Ok(Report { banner: Some((warn, b)), .. })) = &self.report {
                 let fill = if *warn { Color32::from_rgba_unmultiplied(220, 50, 50, 40) } else { Color32::from_rgba_unmultiplied(128, 128, 128, 40) };
                 egui::Frame::new().fill(fill).inner_margin(8.0).corner_radius(4.0)
@@ -481,6 +547,7 @@ impl eframe::App for App {
             _ => self.start_page(ui),
         });
         self.removal_dialog(ctx);
+        self.updates_dialog(ctx);
         self.backups_window(ctx);
     }
 

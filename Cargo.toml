@@ -1,6 +1,6 @@
 [package]
 name = "cyberpunk-mod-compat-checker"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2024"
 description = "Cyberpunk Mod Compatibility Checker"
 license = "MIT"
