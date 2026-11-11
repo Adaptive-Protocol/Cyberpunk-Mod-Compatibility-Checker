@@ -173,6 +173,7 @@ needs = ["RED4ext", "Cyber Engine Tweaks"]
 name = "ReFRACT"
 nexus_id = 34858
 detect = ["red4ext/plugins/ReFRACT/ReFRACTNative.dll"]
+min = { "2.5" = "1.5.1" }                     # maintainer's 2.5 install, 2026-11-11: 1.3.0 refused by RED4ext (2026-11-04), 1.5.1 loads
 needs = ["RED4ext"]
 
 [[mod]]
