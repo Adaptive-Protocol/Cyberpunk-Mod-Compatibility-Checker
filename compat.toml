@@ -24,7 +24,7 @@
 # file types and still need checking against each mod page's requirements.
 
 schema = 1
-updated = "2026-11-08"
+updated = "2026-11-11"
 
 [[build]]
 game = "2.5"
@@ -196,3 +196,11 @@ all = ["archive/pc/mod/*.archive/base/sound/event/eventsmetadata.json"]
 text = "Built for an older patch: replaces the game's sound index; causes missing sounds."
 source = "maintainer's 2.5 install"
 date = "2026-11-08"
+
+[[pattern]]
+name = "Night City Allies (older version)"
+build = "2.5"
+all = ["r6/scripts/NightCityAllies/UI/Hooks/DropdownHooks.reds"]
+text = "Files from an older Night City Allies: redscript can't compile them on 2.5, which stops every script mod. Delete the NightCityAllies folder in r6/scripts, then install the current version with its requirements."
+source = "maintainer's 2.5 install, redscript log"
+date = "2026-11-11"
