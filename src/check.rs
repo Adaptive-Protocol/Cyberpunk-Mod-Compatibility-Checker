@@ -2,7 +2,7 @@
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use crate::remove::Backup;
 use serde::Deserialize;
-use std::{cell::OnceCell, cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
+use std::{cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
 
 pub const BUILT_IN: &str = include_str!("../compat.toml");
 /// The built-in list, parsed once.
@@ -342,6 +342,25 @@ fn addons(idx: &[Script], mut gone: Vec<(usize, String)>) -> Vec<(usize, String,
         gone.extend(new.iter().map(|(r, u, _)| (*r, u.clone())));
         found.extend(new);
     }
+}
+
+/// Script mods in r6/scripts that import a module no installed script declares (outside `@if(ModuleExists(..))`), as
+/// (root, entry, modules): redscript won't compile them at the next launch, and that stops every script mod.
+fn unresolved(idx: &[Script]) -> Vec<(usize, String, Vec<String>)> {
+    let decl: HashSet<&str> = idx.iter().filter_map(|s| s.module.as_deref()).collect();
+    let under = |a: &str, b: &str| a.strip_prefix(b).is_some_and(|t| t.starts_with('.'));      // "A.B" is under "A"
+    let known = |p: &str| decl.iter().any(|m| *m == p || under(p, m) || under(m, p));
+    let mut out: Vec<(usize, String, Vec<String>)> = vec![];
+    for s in idx.iter().filter(|s| s.unit.to_ascii_lowercase().starts_with("r6/scripts/")) {
+        for p in s.imports.iter().filter(|p| !p.is_empty() && !known(p)) {
+            match out.iter_mut().find(|o| o.0 == s.root && o.1 == s.unit) {
+                Some(o) => if !o.2.contains(p) { o.2.push(p.clone()) },
+                None => out.push((s.root, s.unit.clone(), vec![p.clone()])),
+            }
+        }
+    }
+    for o in &mut out { let all = o.2.clone(); o.2.retain(|m| !all.iter().any(|a| under(m, a))); o.2.sort() }   // "A.B" goes without saying after "A"
+    out
 }
 
 /// The RED4ext plugin or redscript mod folder a path points into: "red4ext/plugins/ArchiveXL/ArchiveXL.dll" -> "red4ext/plugins/archivexl".
@@ -947,13 +966,13 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         v
     };
     // ...then the add-ons whose scripts build on what it takes from the game folder (the last root), with their companions
-    let (g, index) = (roots.len() - 1, OnceCell::new());
+    let (g, index) = (roots.len() - 1, scripts(&roots));
     let pieces = |own: &[String], kin: Kin| {
         let own: Vec<String> = own.iter().filter_map(|p| unit(p)).collect();
         let mut found: Vec<(usize, String, Part)> = matching(&own, kin).into_iter().map(|(r, u, mine)| (r, u, if mine { Part::Own } else { Part::Kin })).collect();
         let gone: Vec<(usize, String)> = found.iter().filter(|f| f.0 == g).map(|f| (g, f.1.clone())).collect();
         if !gone.is_empty() {
-            let mut users = addons(index.get_or_init(|| scripts(&roots)), gone);
+            let mut users = addons(&index, gone);
             users.sort_by_key(|(_, u, _)| u.to_lowercase());
             for (r, u, base) in users.into_iter().filter(|(_, u, _)| !framework(u)) {
                 let n = base.rsplit('/').next().unwrap_or(&base);
@@ -971,6 +990,12 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     };
     let mut refused = vi.map_or(vec![], |v| wrong_runtime(&roots, v.0));
     for r in last.iter().flat_map(|l| &l.refused) { if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r.clone()) } }
+    for (_, u, mods) in unresolved(&index).into_iter().filter(|(_, u, _)| !framework(u)) {
+        let n = u.rsplit('/').next().unwrap_or(&u);
+        let r = Refused { folder: u.to_lowercase(), name: n.strip_suffix(".reds").unwrap_or(n).to_string(), version: None, near: false, why: format!(
+            "redscript will fail to compile it at your next launch, which stops every script mod. It builds on {}, which no installed mod provides: install or put back the mod that does, or remove this one too.", list(&mods)) };
+        if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r) }
+    }
 
     let entry = build.as_deref().and_then(|b| m.build.iter().find(|x| cmp_ver(&x.game, b).is_eq()));
     let latest = m.build.iter().map(|x| x.game.as_str()).max_by(|a, b| cmp_ver(a, b));
@@ -1618,6 +1643,28 @@ mod tests {
         assert!(scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().last.unwrap().errors.is_empty());
         assert_eq!(redscript_stamp("[WARN - Sat, 31 Oct 2026 23:59:01 +0100] x"), Some("20261031235901".into()));
         assert_eq!(redscript_stamp("[ERROR] no date"), None);
+    }
+
+    #[test]
+    fn missing_imports() {
+        let root = install("imports", [2, 5, 0, 0], &[]);
+        let put = |rel: &str, t: &str| { let p = root.join(rel); fs::create_dir_all(p.parent().unwrap()).unwrap(); fs::write(p, t).unwrap() };
+        put("r6/scripts/Lib/core.reds", "module Lib.Core\npublic class Thing {}");
+        put("red4ext/plugins/Codeware/Scripts/ui.reds", "module Codeware.UI");
+        put("r6/scripts/Addon/a.reds", "module Addon\nimport Lib.*\nimport Lib.Core.Thing\nimport Codeware.UI.*");
+        put("r6/scripts/Orphan/a.reds", "module Orphan\n// import Comment.*\nimport Gone.*\nimport Gone.Npc.*\n");
+        put("r6/scripts/Orphan/b.reds", "import Other.Thing\nlet s = \"import Quoted.*\";");
+        put("r6/scripts/Optional.reds", "@if(ModuleExists(\"Gone\"))\nimport Gone.*");
+        put("red4ext/plugins/Stray/x.reds", "import Nowhere.*");
+        let red = || scan(&Manifest::parse(LIST).unwrap(), &root, &[], &NO_ENV).unwrap().rows.into_iter().filter(|r| r.status == Status::Red).collect::<Vec<_>>();
+        let r = red();
+        assert_eq!(r.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Orphan"]);
+        assert!(r[0].why.contains("It builds on Gone and Other.Thing, which no installed mod provides"), "{}", r[0].why);
+        assert_eq!(r[0].remove, [("r6/scripts/Orphan".to_string(), Part::Own)]);
+        put("r6/scripts/Gone/n.reds", "module Gone.Npc");
+        assert!(red()[0].why.contains("It builds on Other.Thing,"));
+        put("r6/scripts/Other/t.reds", "module Other\npublic class Thing {}");
+        assert!(red().is_empty());
     }
 
     #[test]
