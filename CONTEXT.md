@@ -53,6 +53,10 @@ _Avoid_: cross core, core mod
 **Suite mod** (planned, v2.0):
 A mod that needs a **Suite core**. It's red when its core is missing, older than it needs, or installed twice; shown grouped under its core.
 
+**Framework Net** (planned, v2.0):
+The map of everything other mods stand on. Every **Framework** and every **Suite core** is a point in it, joined by what each one needs and what it clashes with. The app reads it before launch to say whether the installed points work together.
+_Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay separate terms)
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine
@@ -101,3 +105,4 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 - "update status" / "directed update status" resolved to **Compatibility manifest**.
 - "read-only" (the 2026-10-22 plan) resolved to read-only unless the player asks for a file action (2026-11-04).
 - "cross core" (the 2026-11-08 v2 plan) resolved to **Suite core** and **Suite mod**, since "core mod" isn't a term here and **Framework** means the low-level list.
+- "framework" for Zenitex Core Dependency and DigitalVixen Core (the 2026-11-24 v2 plan) resolved: those are **Suite cores**, and **Framework Net** is the map that holds **Frameworks** and **Suite cores** alike.
