@@ -54,7 +54,7 @@ _Avoid_: cross core, core mod
 A mod that needs a **Suite core**. It's red when its core is missing, older than it needs, or installed twice; shown grouped under its core.
 
 **Contained**, **Engine-reaching** (planned, v2.0):
-How far a **Suite core** reaches. A contained core only adds its own files and records (Zenitex Core Dependency: its items, stats and store), so it can break only its own **Suite mods**. An engine-reaching core has scripts that change game code (DigitalVixen Core), so it can affect other mods and the game. The app reads this from the core's files, and the **Compatibility manifest** can correct it. Only engine-reaching cores are cross-checked with each other.
+How far a mod reaches. A contained mod only adds its own files and records (Zenitex Core Dependency: its items, stats and store), so it can break only itself and the **Suite mods** that need it. An engine-reaching mod has scripts that change game code, so it can affect other mods and the game. It can be a **Suite core** (DigitalVixen Core, They Will Remember) or an overhaul nothing depends on (Trigger Mode Control, Combat Evolved). The app reads this from the mod's files, and the **Compatibility manifest** can correct it. Every engine-reaching mod is cross-checked against the others for **Overlaps**; contained mods aren't.
 _Avoid_: isolated, engine-level
 
 **Framework Net** (planned, v2.0):
