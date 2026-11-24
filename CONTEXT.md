@@ -57,6 +57,10 @@ A mod that needs a **Suite core**. It's red when its core is missing, older than
 The map of everything other mods stand on. Every **Framework** and every **Suite core** is a point in it, joined by what each one needs and what it clashes with. The app reads it before launch to say whether the installed points work together.
 _Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay separate terms)
 
+**Overlap** (planned, v2.0):
+Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). Never a verdict.
+_Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine
@@ -97,6 +101,7 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 - The utility finds the game folder itself (Steam, GOG, Epic; Windows and Linux), with a folder picker as fallback. If it detects Mod Organizer 2, it also scans the MO2 mods folder (v1).
 - Only **Mod entries** inside the game folder can be moved or deleted, never a **Framework**, its **Loader** or the game's own files. A path that leaves the game folder is refused, including one from a drop-in compat.toml.
 - Mods installed with Mod Organizer 2 are never moved: the app says to untick them in MO2.
+- In the **Framework Net** a row is red only for a certain break: something it needs is missing or older than required, a **Suite core** is installed twice, or the **Compatibility manifest** names the clash. An **Overlap** never turns a row red.
 - **Delete** backs up first and then deletes the **Backup**, so a failed move changes nothing.
 - The **Bridge agent** (.claude/agents/compat-bridge.md) writes the **Compatibility manifest**; the utility reads it, offline.
 
