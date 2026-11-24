@@ -54,7 +54,7 @@ _Avoid_: cross core, core mod
 A mod that needs a **Suite core**. It's red when its core is missing, older than it needs, or installed twice; shown grouped under its core.
 
 **Contained**, **Engine-reaching** (planned, v2.0):
-How far a mod reaches. A contained mod only adds its own files and records (Zenitex Core Dependency: its items, stats and store), so it can break only itself and the **Suite mods** that need it. An engine-reaching mod has scripts that change game code, so it can affect other mods and the game. It can be a **Suite core** (DigitalVixen Core, They Will Remember) or an overhaul nothing depends on (Trigger Mode Control, Combat Evolved). The app reads this from the mod's files, and the **Compatibility manifest** can correct it. Every engine-reaching mod is cross-checked against the others for **Overlaps**; contained mods aren't.
+How far a mod reaches. A contained mod only adds its own files and records (Zenitex Core Dependency: its items, stats and store), so it can break only itself and the **Suite mods** that need it. An engine-reaching mod has scripts that change game code, so it can affect other mods and the game. It can be a **Suite core** (DigitalVixen Core, They Will Remember) or an overhaul nothing depends on (Trigger Mode Control, Combat Evolved). The app reads this from the mod's files, and the **Compatibility manifest** can correct it. Every engine-reaching mod is cross-checked against the others for **Overlaps**; a contained mod is checked only within its own suite.
 _Avoid_: isolated, engine-level
 
 **Framework Net** (planned, v2.0):
@@ -62,7 +62,7 @@ The map of everything other mods stand on. Every **Framework** and every **Suite
 _Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay separate terms)
 
 **Overlap** (planned, v2.0):
-Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). Never a verdict.
+Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). When one mod replaces a method and another wraps it, both still run, so that is only a detail line inside the replacing mod's row. Two mods wrapping the same method chain safely and aren't shown. Never a verdict.
 _Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
 
 **Back up and remove**:
