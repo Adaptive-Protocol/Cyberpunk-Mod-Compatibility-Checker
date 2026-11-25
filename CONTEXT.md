@@ -70,7 +70,7 @@ A separate window where the player drops a mod's archive (or chooses it) before 
 _Avoid_: sandbox (nothing runs in isolation), test
 
 **Candidate** (planned, v2.0):
-The mod archive given to the **Pre-install check**.
+The mod given to the **Pre-install check**: a .7z or .zip archive, or a folder. A .rar isn't opened; the player extracts it and gives the folder.
 
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
