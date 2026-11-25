@@ -117,7 +117,7 @@ impl std::fmt::Display for Loc {
 pub struct Rec { pub record: String, pub field: String, pub set: bool, pub at: Loc }
 
 /// What a mod's files say about it.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Facts {
     pub modules: Vec<String>,                   // modules its scripts declare
     pub imports: Vec<(String, Loc)>,            // modules they need
@@ -136,14 +136,16 @@ pub struct Facts {
 impl Facts {
     /// Adds what one file says, by where it installs (`rel`, from the game folder).
     pub fn add(&mut self, rel: &str, b: &[u8]) {
-        let low = rel.to_ascii_lowercase();
+        let Some(f) = needs(rel) else { return };
+        self.uses.insert(f);
         let t = || String::from_utf8_lossy(b);
-        if low.ends_with(".reds") { self.script(rel, &crate::check::reds(&t())) }
-        else if low.ends_with(".xl") { self.uses.insert("ArchiveXL"); }
-        else if low.starts_with("r6/tweaks/") && (low.ends_with(".yaml") || low.ends_with(".yml")) { self.uses.insert("TweakXL"); self.records.extend(tweaks(rel, &t())) }
-        else if low.starts_with("r6/tweaks/") && low.ends_with(".tweak") { self.uses.insert("TweakXL"); }
-        else if low.starts_with("bin/x64/plugins/cyber_engine_tweaks/mods/") && low.ends_with(".lua") { self.uses.insert("Cyber Engine Tweaks"); self.cet.extend(overrides(rel, &t())) }
-        else if low.starts_with("red4ext/plugins/") && low.ends_with(".dll") { self.uses.insert("RED4ext"); self.plugins.push(rel.to_string()) }
+        match f {
+            "redscript" => self.script(rel, &crate::check::reds(&t())),
+            "TweakXL" if !rel.to_ascii_lowercase().ends_with(".tweak") => self.records.extend(tweaks(rel, &t())),
+            "Cyber Engine Tweaks" => self.cet.extend(overrides(rel, &t())),
+            "RED4ext" => self.plugins.push(rel.to_string()),
+            _ => {}
+        }
     }
 
     pub fn script(&mut self, file: &str, r: &Reds) {
@@ -167,6 +169,16 @@ impl Facts {
             if let Some((hs, fp)) = index_file(&p) { self.prints.push((rel.clone(), fp)); for h in hs { self.files.entry(h).or_insert_with(|| rel.clone()); } }
         }
     }
+}
+
+/// The framework a file needs, by its type and place: redscript for scripts, ArchiveXL for .xl files, TweakXL for
+/// tweaks, Cyber Engine Tweaks for CET mods' Lua, RED4ext for its plugins.
+pub fn needs(rel: &str) -> Option<&'static str> {
+    let low = rel.to_ascii_lowercase();
+    Some(if low.ends_with(".reds") { "redscript" } else if low.ends_with(".xl") { "ArchiveXL" }
+        else if low.starts_with("r6/tweaks/") && [".yaml", ".yml", ".tweak"].iter().any(|e| low.ends_with(e)) { "TweakXL" }
+        else if low.starts_with("bin/x64/plugins/cyber_engine_tweaks/mods/") && low.ends_with(".lua") { "Cyber Engine Tweaks" }
+        else if low.starts_with("red4ext/plugins/") && low.ends_with(".dll") { "RED4ext" } else { return None })
 }
 
 /// The records a TweakXL .yaml edits, by field: top-level keys are records, the keys under them fields. A record with
@@ -250,16 +262,25 @@ pub fn missing(mods: &[String], declared: &[&str]) -> String {
 }
 
 /// One mod as the Net sees it: its name, where it is (root, as in check.rs), its **Mod entries** and its facts.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Mod { pub name: String, pub root: usize, pub entries: Vec<String>, pub facts: Facts, pub reach: Option<(Reach, String)>, pub version: Option<String> }   // reach: the list's correction and why; version: MO2's
 
-/// A row in the Net's group: a title, whether it's red, and the lines under it.
+/// A row in the Net's group: a title, the lines under it, and the mods it's about (by index).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Row { pub title: String, pub lines: Vec<String> }
+pub struct Row { pub title: String, pub lines: Vec<String>, pub mods: Vec<usize> }
 
-/// A certain break the Net found, for a red row: the entry to offer, the mod's name, and why.
+/// A certain break the Net found, for a red row: the mod (by index), the entry to offer, the mod's name, and why.
 #[derive(Debug, Clone)]
-pub struct Break { pub entry: String, pub name: String, pub why: String }
+pub struct Break { pub at: usize, pub entry: String, pub name: String, pub why: String }
+
+/// What a scan learned about the installed mods, kept for the **Pre-install check**: the mods and their facts, the
+/// modules frameworks declare, the frameworks installed and each one's paths, and the game's own files (read once, on
+/// the first check).
+#[derive(Debug, Default)]
+pub struct Installed {
+    pub mods: Vec<Mod>, pub fw: BTreeSet<String>, pub has: BTreeSet<String>, pub frameworks: Vec<(String, Vec<String>)>,
+    pub mac: bool, pub game: PathBuf, pub game_files: std::sync::OnceLock<BTreeSet<u64>>,
+}
 
 #[derive(Debug, Default)]
 pub struct Net { pub cores: Vec<Row>, pub overlaps: Vec<Row>, pub details: Vec<Row>, pub breaks: Vec<Break>, pub engine: usize }
@@ -307,8 +328,9 @@ fn version<'a>(c: &'a Core, m: &Mod) -> Option<&'a str> {
 }
 
 /// The Net over the installed mods. `has` says whether a framework (by its compat.toml name) is installed.
-/// `fw` holds the modules frameworks declare (Codeware's), which make no mod a core.
-pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSet<String>, mac: bool) -> Net {
+/// `fw` holds the modules frameworks declare (Codeware's), which make no mod a core. With `cand`, overlaps are only
+/// looked for between that mod (a **Candidate**) and the others.
+pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSet<String>, mac: bool, cand: Option<usize>) -> Net {
     let mut n = Net::default();
     // archive cores from the list, with the mods that match its suite globs
     let mut suite: Vec<Option<usize>> = vec![None; mods.len()];     // mod -> the core mod it belongs to
@@ -319,7 +341,7 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         let users: Vec<usize> = (0..mods.len()).filter(|i| !found.contains(i) && mods[*i].entries.iter().any(|u| c.suite.iter().any(|s| wild(&s.detect, u)))).collect();
         if found.is_empty() {
             for &i in &users {
-                n.breaks.push(Break { entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!(
+                n.breaks.push(Break { at: i, entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!(
                     "It's part of {}'s suite and needs {}, which isn't installed. Install it{}, or remove this one too.", c.name, c.name, c.nexus_id.map_or(String::new(), |id| format!(" (nexusmods.com/cyberpunk2077/mods/{id})"))) });
             }
             continue
@@ -331,18 +353,19 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         let all: Vec<&String> = found.iter().flat_map(|&i| &mods[i].entries).collect();
         let copies = c.detect.iter().map(|d| all.iter().filter(|u| wild(d, u)).map(|s| s.to_string()).collect::<Vec<_>>()).find(|v| v.len() > 1);
         if let Some(e) = copies {
-            n.breaks.push(Break { entry: e[1].clone(), name: c.name.clone(), why: format!("{} is installed twice ({}). Keep one copy: remove the older one.", c.name, list(&e)) });
+            let at = found.iter().copied().find(|&i| mods[i].entries.contains(&e[1])).unwrap_or(found[0]);
+            n.breaks.push(Break { at, entry: e[1].clone(), name: c.name.clone(), why: format!("{} is installed twice ({}). Keep one copy: remove the older one.", c.name, list(&e)) });
         }
         let have = version(c, &mods[found[0]]);
         for &i in &users {
             let Some(min) = c.suite.iter().find(|s| mods[i].entries.iter().any(|u| wild(&s.detect, u))).and_then(|s| s.min.as_deref()) else { continue };
             if let Some(h) = have && cmp_ver(h, min).is_lt() {
-                n.breaks.push(Break { entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!("It needs {} {min} or newer, and {h} is installed: update {}.", c.name, c.name) });
+                n.breaks.push(Break { at: i, entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!("It needs {} {min} or newer, and {h} is installed: update {}.", c.name, c.name) });
             }
         }
         for f in c.needs.iter().filter(|f| !has(f) || mac && MAC_LACKS.contains(&f.as_str())) {
             let why = if mac { format!("It needs {f}, which macOS doesn't have, so it can't work on a Mac.") } else { format!("It needs {f}, which isn't installed.") };
-            n.breaks.push(Break { entry: mods[found[0]].entries[0].clone(), name: c.name.clone(), why });
+            n.breaks.push(Break { at: found[0], entry: mods[found[0]].entries[0].clone(), name: c.name.clone(), why });
         }
     }
     // script cores: mods whose modules other mods import
@@ -376,14 +399,14 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         }
     }
     for (a, b, what) in twice {
-        n.breaks.push(Break { entry: mods[b].entries[0].clone(), name: mods[b].name.clone(), why: format!(
+        n.breaks.push(Break { at: b, entry: mods[b].entries[0].clone(), name: mods[b].name.clone(), why: format!(
             "It and {} both define {what}, so redscript can't compile them together, which stops every script mod. If one is an older copy of the other, remove it.", mods[a].name) });
     }
     // mods that need a framework that isn't there (or, on a Mac, can't be)
-    for m in mods.iter() {
+    for (i, m) in mods.iter().enumerate() {
         let lacks: Vec<String> = m.facts.uses.iter().filter(|f| mac && MAC_LACKS.contains(f)).map(|s| s.to_string()).collect();
         if lacks.is_empty() { continue }              // off a Mac, check.rs gives a missing framework one row of its own
-        n.breaks.push(Break { entry: m.entries[0].clone(), name: m.name.clone(), why: format!("It needs {}, which macOS doesn't have, so it can't work on a Mac.", list(&lacks)) });
+        n.breaks.push(Break { at: i, entry: m.entries[0].clone(), name: m.name.clone(), why: format!("It needs {}, which macOS doesn't have, so it can't work on a Mac.", list(&lacks)) });
     }
     for (&c, us) in &users {
         suite[c] = suite[c].or(Some(c));
@@ -397,18 +420,19 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         let mut lines: Vec<String> = us.iter().map(|&u| format!("Needed by {}", mods[u].name)).collect();
         lines.sort();
         if let Some((r, why)) = &m.reach { lines.push(format!("The list counts it as {}: {why}", reach(*r))) }
-        n.cores.push(Row { title: format!("{}: script core, {}{}, {}", m.name, reach(m.reach()), v.unwrap_or_default(), count(us.len(), "suite mod")), lines });
+        n.cores.push(Row { title: format!("{}: script core, {}{}, {}", m.name, reach(m.reach()), v.unwrap_or_default(), count(us.len(), "suite mod")), lines, mods: [c].into_iter().chain(us.iter().copied()).collect() });
     }
     for &(c, core) in &cores {
-        let us: Vec<String> = (0..mods.len()).filter(|&i| i != c && suite[i] == Some(c) && !mods[c].entries.iter().all(|e| mods[i].entries.contains(e))).map(|i| format!("Needed by {}", mods[i].name)).collect();
+        let ids: Vec<usize> = (0..mods.len()).filter(|&i| i != c && suite[i] == Some(c) && !mods[c].entries.iter().all(|e| mods[i].entries.contains(e))).collect();
+        let us: Vec<String> = ids.iter().map(|&i| format!("Needed by {}", mods[i].name)).collect();
         let r = core.reach.unwrap_or_else(|| mods[c].reach());
-        n.cores.push(Row { title: format!("{}: archive core, {}{}, {}", core.name, reach(r), version(core, &mods[c]).map(|v| format!(", version {v}")).or_else(|| mods[c].version.as_ref().map(|v| format!(", version {v} (from MO2)"))).unwrap_or_default(), count(us.len(), "suite mod")), lines: [us, vec![format!("Listed from {}, {}", core.source, core.date)]].concat() });
+        n.cores.push(Row { title: format!("{}: archive core, {}{}, {}", core.name, reach(r), version(core, &mods[c]).map(|v| format!(", version {v}")).or_else(|| mods[c].version.as_ref().map(|v| format!(", version {v} (from MO2)"))).unwrap_or_default(), count(us.len(), "suite mod")), lines: [us, vec![format!("Listed from {}, {}", core.source, core.date)]].concat(), mods: [c].into_iter().chain(ids).collect() });
     }
     n.cores.sort_by_key(|r| r.title.to_lowercase());
     // overlaps: every engine-reaching mod against the others, and contained mods within their own suite
     let engine: Vec<bool> = mods.iter().map(|m| m.reach() == Reach::Engine).collect();
     n.engine = engine.iter().filter(|e| **e).count();
-    let pair = |i: usize, j: usize| engine[i] && engine[j] || suite[i].is_some() && suite[i] == suite[j];
+    let pair = |i: usize, j: usize| (engine[i] && engine[j] || suite[i].is_some() && suite[i] == suite[j]) && cand.is_none_or(|c| i == c || j == c);
     for i in (0..mods.len()).filter(|&i| engine[i] || suite[i].is_some()) { mods[i].facts.read_archives() }
     overlaps(mods, &pair, &|i, j| patch[i] != patch[j], &mut n);
     n
@@ -428,7 +452,7 @@ fn at(l: &Loc) -> String { if l.line == 0 { l.file.clone() } else { l.to_string(
 /// `meant` tells pairs whose shared archive files are by design, such as a core's camo add-on and the items it recolours.
 pub fn overlaps(mods: &[Mod], pair: &dyn Fn(usize, usize) -> bool, meant: &dyn Fn(usize, usize) -> bool, n: &mut Net) {
     let mut by: BTreeMap<(usize, usize), Vec<String>> = BTreeMap::new();
-    let mut detail: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+    let mut detail: BTreeMap<usize, (Vec<String>, BTreeSet<usize>)> = BTreeMap::new();
     let mut targets: BTreeMap<&str, Vec<(usize, Hook, &Loc)>> = BTreeMap::new();
     for (i, m) in mods.iter().enumerate() { for (h, t, l) in &m.facts.hooks { if matches!(h, Hook::Replace | Hook::Wrap) { targets.entry(t).or_default().push((i, *h, l)) } } }
     for (t, v) in &targets {
@@ -439,7 +463,9 @@ pub fn overlaps(mods: &[Mod], pair: &dyn Fn(usize, usize) -> bool, meant: &dyn F
                     (Hook::Replace, Hook::Replace) => by.entry((i.min(j), i.max(j))).or_default().push(format!("Both replace {t} ({}; {}): only one of them takes effect.", at(li), at(lj))),
                     (Hook::Replace, Hook::Wrap) | (Hook::Wrap, Hook::Replace) => {
                         let (r, w, lw) = if hi == Hook::Replace { (i, j, lj) } else { (j, i, li) };
-                        detail.entry(r).or_default().push(format!("{t}: {} wraps it ({}), so its code runs around {}'s version, not the game's.", mods[w].name, at(lw), mods[r].name));
+                        let d = detail.entry(r).or_default();
+                        d.0.push(format!("{t}: {} wraps it ({}), so its code runs around {}'s version, not the game's.", mods[w].name, at(lw), mods[r].name));
+                        d.1.insert(w);
                     }
                     _ => {}
                 }
@@ -476,11 +502,11 @@ pub fn overlaps(mods: &[Mod], pair: &dyn Fn(usize, usize) -> bool, meant: &dyn F
             by.entry((i, j)).or_default().push(format!("{fa} and {fb} hold {c} of the same game {}: {win} loads first and wins.", if c == 1 { "file" } else { "files" }));
         }
     }
-    for ((i, j), lines) in by { n.overlaps.push(Row { title: format!("{} and {}", mods[i].name, mods[j].name), lines }) }
-    for (r, mut lines) in detail {
+    for ((i, j), lines) in by { n.overlaps.push(Row { title: format!("{} and {}", mods[i].name, mods[j].name), lines, mods: vec![i, j] }) }
+    for (r, (mut lines, ws)) in detail {
         lines.sort();
         lines.dedup();
-        n.details.push(Row { title: format!("{} replaces {} that other mods wrap", mods[r].name, count(lines.len(), "method")), lines });
+        n.details.push(Row { title: format!("{} replaces {} that other mods wrap", mods[r].name, count(lines.len(), "method")), lines, mods: [r].into_iter().chain(ws).collect() });
     }
 }
 
@@ -564,10 +590,10 @@ mod tests {
             m("Wrapper2", |f| f.script("r6/scripts/Wrapper2/w.reds", &s("@wrapMethod(X)\nfunc Y() {}\n"))),
             m("Plain", |f| f.script("r6/scripts/Plain/p.reds", &s("@addMethod(X)\nfunc Z() {}\n"))),
         ];
-        let n = net(&mut mods, &List::parse("schema = 1\nupdated = \"x\"").unwrap(), &|_| true, &BTreeSet::new(), false);
+        let n = net(&mut mods, &List::parse("schema = 1\nupdated = \"x\"").unwrap(), &|_| true, &BTreeSet::new(), false, None);
         assert_eq!(n.engine, 4);
         assert_eq!(n.overlaps, [Row { title: "SortA and SortB".into(), lines: vec![
-            "Both replace NewItemCompareBuilder.QualityAsc (r6/scripts/SortA/a.reds line 1; r6/scripts/SortB/b.reds line 1): only one of them takes effect.".into()] }]);
+            "Both replace NewItemCompareBuilder.QualityAsc (r6/scripts/SortA/a.reds line 1; r6/scripts/SortB/b.reds line 1): only one of them takes effect.".into()], mods: vec![0, 1] }]);
         assert_eq!(n.details.len(), 2, "each replacing mod gets the wrapper as a detail; two wraps aren't shown");
         assert!(n.details[0].lines[0].starts_with("NewItemCompareBuilder.QualityAsc: Wrapper wraps it (r6/scripts/Wrapper/w.reds line 1)"));
     }
@@ -581,7 +607,7 @@ mod tests {
             m("Combat", |f| f.script("r6/scripts/Combat/c.reds", &s("import DigitalVixenCore.Api4_9_14\nimport DigitalVixenCore.*\n"))),
             m("OldCopy", |f| f.script("r6/scripts/OldCopy/b.reds", &s("module DigitalVixenCore\npublic class Hub {}\n"))),
         ];
-        let n = net(&mut mods, &List::parse("schema = 1\nupdated = \"x\"").unwrap(), &|_| true, &BTreeSet::new(), false);
+        let n = net(&mut mods, &List::parse("schema = 1\nupdated = \"x\"").unwrap(), &|_| true, &BTreeSet::new(), false, None);
         assert!(n.cores.iter().any(|c| c.title == "DVCore2: script core, contained, 1 suite mod" && c.lines == ["Needed by Combat"]), "{:?}", n.cores);
         assert_eq!(n.breaks.len(), 1);
         assert!(n.breaks[0].name == "OldCopy" && n.breaks[0].why.starts_with("It and DVCore2 both define DigitalVixenCore.Hub"));

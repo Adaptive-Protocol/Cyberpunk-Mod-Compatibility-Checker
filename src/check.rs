@@ -380,13 +380,9 @@ fn addons(idx: &[Script], mut gone: Vec<(usize, String)>) -> Vec<(usize, String,
 /// (root, entry, modules): redscript won't compile them at the next launch, and that stops every script mod.
 fn unresolved(idx: &[Script]) -> Vec<(usize, String, Vec<String>)> {
     let decl: HashSet<&str> = idx.iter().filter_map(|s| s.module.as_deref()).collect();
-    let under = |a: &str, b: &str| a.strip_prefix(b).is_some_and(|t| t.starts_with('.'));      // "A.B" is under "A"
-    // a version marker ("X.Api4_9_14") must be declared itself: an older copy of the core declares X too
-    let mark = |p: &str| p.match_indices('.').map(|(i, _)| &p[..i]).chain([p]).find(|q| crate::net::marker(q).is_some()).map(str::to_string);
-    let known = |p: &str| match mark(p) { Some(q) => decl.iter().any(|m| *m == q || under(m, &q)), None => decl.iter().any(|m| *m == p || under(p, m) || under(m, p)) };
     let mut out: Vec<(usize, String, Vec<String>)> = vec![];
     for s in idx.iter().filter(|s| s.unit.to_ascii_lowercase().starts_with("r6/scripts/")) {
-        for p in s.imports.iter().filter(|p| !p.is_empty() && !known(p)).map(|p| mark(p).unwrap_or_else(|| p.clone())) {
+        for p in s.imports.iter().filter_map(|p| unmet(&decl, p)) {
             match out.iter_mut().find(|o| o.0 == s.root && o.1 == s.unit) {
                 Some(o) => if !o.2.contains(&p) { o.2.push(p) },
                 None => out.push((s.root, s.unit.clone(), vec![p])),
@@ -395,6 +391,16 @@ fn unresolved(idx: &[Script]) -> Vec<(usize, String, Vec<String>)> {
     }
     for o in &mut out { let all = o.2.clone(); o.2.retain(|m| !all.iter().any(|a| under(m, a))); o.2.sort() }   // "A.B" goes without saying after "A"
     out
+}
+
+fn under(a: &str, b: &str) -> bool { a.strip_prefix(b).is_some_and(|t| t.starts_with('.')) }     // "A.B" is under "A"
+
+/// The module an import needs when nothing in `decl` provides it. A version marker ("X.Api4_9_14") must be declared
+/// itself, since an older copy of the core declares X too; any other import is met by its module or one above or below.
+pub fn unmet(decl: &HashSet<&str>, p: &str) -> Option<String> {
+    let mark = p.match_indices('.').map(|(i, _)| &p[..i]).chain([p]).find(|q| crate::net::marker(q).is_some());
+    let met = match mark { Some(q) => decl.iter().any(|m| *m == q || under(m, q)), None => decl.iter().any(|m| *m == p || under(p, m) || under(m, p)) };
+    (!p.is_empty() && !met).then(|| mark.unwrap_or(p).to_string())
 }
 
 /// The RED4ext plugin or redscript mod folder a path points into: "red4ext/plugins/ArchiveXL/ArchiveXL.dll" -> "red4ext/plugins/archivexl".
@@ -962,6 +968,7 @@ pub struct Report {
     pub vortex: bool,               // Vortex deployed mods into the game folder
     pub net: crate::net::Net,       // the Framework Net: cores, overlaps and details
     pub mac: bool,                  // the Mac game, checked read-only
+    pub installed: std::sync::Arc<crate::net::Installed>,   // what the Pre-install check compares a Candidate with
 }
 
 /// What the app checks on a Mac, where only redscript runs.
@@ -1052,7 +1059,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let mut mods = crate::net::mods(&roots, &entries, &index, &owner, &framework, &env.net);
     for x in &mut mods { x.version = meta[x.root].0.clone() }
     let fw: BTreeSet<String> = index.iter().filter(|s| framework(&s.unit)).filter_map(|s| s.module.clone()).collect();
-    let net = crate::net::net(&mut mods, &env.net, &has, &fw, env.mac);
+    let net = crate::net::net(&mut mods, &env.net, &has, &fw, env.mac, None);
     for b in &net.breaks {
         let r = Refused { folder: b.entry.to_lowercase(), name: b.name.clone(), version: None, near: false, why: b.why.clone() };
         if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r) }
@@ -1186,7 +1193,10 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let updated = updated(&roots, &entries, crate::remove::list(game));
     let vortex = ["", "archive/pc/mod"].iter().filter_map(|d| resolve(game, d)).flat_map(|d| files(&d)).any(|f| name(&f).to_lowercase().starts_with("vortex.deployment"));
     let banner = if env.mac { Some((false, MAC_NOTE.to_string())) } else { banner };
-    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter: crash_reporter || env.mac, updated, vortex, net, mac: env.mac })
+    let installed = std::sync::Arc::new(crate::net::Installed { has: m.framework.iter().map(|e| e.name.clone()).filter(|f| has(f)).collect(),
+        frameworks: m.framework.iter().map(|e| (e.name.clone(), e.detect.iter().chain(&e.parts).cloned().collect())).collect(),
+        mods, fw, mac: env.mac, game: game.to_path_buf(), game_files: Default::default() });
+    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter: crash_reporter || env.mac, updated, vortex, net, mac: env.mac, installed })
 }
 
 /// Plain-text report, for `--report` and the tests.

@@ -3,6 +3,7 @@
 //! Offline: it never connects to anything. It changes files only when the user asks (remove.rs).
 mod check;
 mod locate;
+mod candidate;
 mod net;
 mod remove;
 
