@@ -432,8 +432,9 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
     // overlaps: every engine-reaching mod against the others, and contained mods within their own suite
     let engine: Vec<bool> = mods.iter().map(|m| m.reach() == Reach::Engine).collect();
     n.engine = engine.iter().filter(|e| **e).count();
-    let pair = |i: usize, j: usize| (engine[i] && engine[j] || suite[i].is_some() && suite[i] == suite[j]) && cand.is_none_or(|c| i == c || j == c);
-    for i in (0..mods.len()).filter(|&i| engine[i] || suite[i].is_some()) { mods[i].facts.read_archives() }
+    // a Candidate is checked against every mod, since one mod against the rest is cheap and its overlaps are the point
+    let pair = |i: usize, j: usize| match cand { Some(c) => i == c || j == c, None => engine[i] && engine[j] || suite[i].is_some() && suite[i] == suite[j] };
+    for i in (0..mods.len()).filter(|&i| cand.is_some() || engine[i] || suite[i].is_some()) { mods[i].facts.read_archives() }
     overlaps(mods, &pair, &|i, j| patch[i] != patch[j], &mut n);
     n
 }

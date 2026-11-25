@@ -219,7 +219,7 @@ fn dom(xml: &str) -> Option<Node> {
 }
 
 /// Text from bytes that may be UTF-16 (as installers often are) or UTF-8.
-fn text(b: &[u8]) -> String {
+fn utf(b: &[u8]) -> String {
     let wide = |be: bool| char::decode_utf16(b[2..].chunks_exact(2).map(|c| if be { u16::from_be_bytes([c[0], c[1]]) } else { u16::from_le_bytes([c[0], c[1]]) }))
         .map(|c| c.unwrap_or('\u{fffd}')).collect();
     match b { [0xFF, 0xFE, ..] => wide(false), [0xFE, 0xFF, ..] => wide(true), _ => String::from_utf8_lossy(b.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(b)).into_owned() }
@@ -230,7 +230,7 @@ fn slash(p: &str) -> String { p.replace('\\', "/").trim_matches('/').to_string()
 impl Fomod {
     /// Parses fomod/ModuleConfig.xml at `path` inside the archive. Paths in it start at the folder holding fomod/.
     pub fn parse(path: &str, b: &[u8]) -> Option<Self> {
-        let root = dom(&text(b))?;
+        let root = dom(&utf(b))?;
         let cfg = root.kid("config")?;
         let base = slash(&path[..path.to_lowercase().rfind("fomod/")?]);
         let copies = |n: Option<&Node>| -> Vec<Copy> { n.map(|n| n.kids.iter().filter(|k| k.tag == "file" || k.tag == "folder").map(|k| {
@@ -356,6 +356,14 @@ pub fn place<'a>(c: &'a Candidate, has: &dyn Fn(&str) -> bool) -> (Vec<(String, 
     (out, lost, if roots.len() > 1 { roots.into_iter().map(|r| if r.is_empty() { "the top folder".into() } else { r }).collect() } else { vec![] })
 }
 
+/// A group's rule in words, for the option list.
+pub fn rule(k: Kind) -> &'static str {
+    match k { Kind::One => "pick one", Kind::AtMostOne => "at most one", Kind::AtLeastOne => "at least one", Kind::All => "all of them", Kind::Any => "any" }
+}
+
+/// Can the player change this option? The installer fixes required, unusable and select-all ones.
+pub fn changeable(k: Kind, o: &Opt) -> bool { k != Kind::All && o.ty != Ty::Required && o.ty != Ty::NotUsable }
+
 /// A **Pre-install check**'s result: the Candidate's reach in words, what will break (each naming the Candidate's file,
 /// and its line where there is one), notes, its place in the Net, and the **Mod entries** it would install.
 #[derive(Debug, Clone, Default)]
@@ -392,10 +400,10 @@ pub fn precheck(inst: &Installed, nl: &net::List, c: &Candidate) -> Pre {
     let n = net::net(&mut mods, nl, &|f| inst.has.contains(f), &inst.fw, inst.mac, Some(ci));
     let cm = &mods[ci];
     let mut p = Pre { entries: cm.entries.clone(), net: n.cores.iter().filter(|r| r.mods.contains(&ci)).cloned().collect(), ..Default::default() };
-    p.reach = match cm.reach() {
-        Reach::Engine => format!("Engine-reaching: it changes game code, so it was checked against {}.", count(n.engine - 1, "engine-reaching mod")),
-        Reach::Contained => "Contained: it doesn't change game code, so its needs, its suite and the game files it replaces were checked.".into(),
-    };
+    p.reach = format!("{} It was checked against {} you have installed.", match cm.reach() {
+        Reach::Engine => "Engine-reaching: it changes game code.",
+        Reach::Contained => "Contained: it doesn't change game code, so its needs and the game files it would replace were checked.",
+    }, count(mods.len() - 1, "mod"));
     // will break: imports nothing provides, frameworks that aren't installed, and the Net's certain breaks
     let decl: HashSet<&str> = mods.iter().flat_map(|x| x.facts.modules.iter().map(String::as_str)).chain(inst.fw.iter().map(String::as_str)).collect();
     let mut seen = BTreeSet::new();
@@ -440,6 +448,20 @@ pub fn precheck(inst: &Installed, nl: &net::List, c: &Candidate) -> Pre {
     if !alts.is_empty() { p.notes.push(format!("It holds {} alternatives without an installer ({}): they were checked together, so install only one.", alts.len(), list(&alts))) }
     if placed.is_empty() { p.notes.push("Nothing in it installs into the game's folders, so there was nothing to check.".into()) }
     p
+}
+
+/// Plain text for `--precheck` and the tests.
+pub fn text(c: &Candidate, p: &Pre) -> String {
+    let mut s = format!("{}{}\n{}\n{}\n", c.name, c.version.as_deref().map_or(String::new(), |v| format!(" {v}")), p.summary(), p.reach);
+    for (head, lines) in [("will break", &p.breaks), ("note", &p.notes)] { for l in lines.iter() { s += &format!("\t{head}: {l}\n") } }
+    for r in &p.net { s += &format!("\tnet: {}\n", r.title); for l in &r.lines { s += &format!("\t\t{l}\n") } }
+    if let Some(f) = &c.fomod {
+        for st in &f.steps { for g in &st.groups { for o in &g.options {
+            s += &format!("\toption: [{}] {} / {} ({})\n", if o.on { "x" } else { " " }, st.name, o.name, rule(g.kind));
+        } } }
+    }
+    if !p.entries.is_empty() { s += &format!("\tinstalls: {}\n", p.entries.join(", ")) }
+    s
 }
 
 #[cfg(test)]
