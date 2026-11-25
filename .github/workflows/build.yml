@@ -24,6 +24,9 @@ jobs:
           - os: ubuntu-22.04
             asset: CyberpunkModCompatibilityChecker-linux
             exe: CyberpunkModCompatibilityChecker
+          - os: macos-14                                  # Apple silicon; the Mac app only reports, so it's never signed for file actions
+            asset: CyberpunkModCompatibilityChecker-macos.zip
+            exe: CyberpunkModCompatibilityChecker
     runs-on: ${{ matrix.os }}
     # Windows releases run in the "release" environment: Azure trusts only this environment, and it can require an approval
     environment: ${{ matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/') && 'release' || '' }}
@@ -31,6 +34,7 @@ jobs:
       # Windows releases are signed by Azure Artifact Signing once AZURE_SIGNING_ACCOUNT is set (else SignPath once SIGNPATH_ORGANIZATION_ID is set);
       # from then on missing settings fail the release instead of shipping it unsigned
       SIGN: ${{ matrix.os == 'windows-latest' && startsWith(github.ref, 'refs/tags/') && (vars.AZURE_SIGNING_ACCOUNT != '' && 'azure' || vars.SIGNPATH_ORGANIZATION_ID != '' && 'signpath') || '' }}
+      APP: Cyberpunk Mod Compatibility Checker
     defaults:
       run:
         shell: bash
@@ -77,7 +81,35 @@ jobs:
               if not any(b'level="asInvoker"' in m for m in manifests): sys.exit(f"{f}: no asInvoker manifest, so Windows may ask for admin rights")
           PY
 
-      - run: mkdir dist && mv "target/release/${{ matrix.exe }}" "dist/${{ matrix.asset }}"
+      - if: runner.os != 'macOS'
+        run: mkdir dist && mv "target/release/${{ matrix.exe }}" "dist/${{ matrix.asset }}"
+      - name: Mac app bundle, ad-hoc signed (no Apple Developer account, so users approve it once in System Settings)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          app="$APP.app"
+          mkdir -p "$app/Contents/MacOS"
+          mv "target/release/${{ matrix.exe }}" "$app/Contents/MacOS/${{ matrix.exe }}"
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          sed 's/^ *//' > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleName</key><string>$APP</string>
+            <key>CFBundleDisplayName</key><string>$APP</string>
+            <key>CFBundleIdentifier</key><string>com.fauxnoodles.cyberpunkmodcompatibilitychecker</string>
+            <key>CFBundleExecutable</key><string>${{ matrix.exe }}</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>$v</string>
+            <key>CFBundleVersion</key><string>$v</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          codesign --force -s - "$app"      # ad-hoc: it proves the app hasn't changed since the build, not who made it
+          codesign --verify --strict --verbose=2 "$app"
+          ditto -c -k --keepParent "$app" "dist/${{ matrix.asset }}"
+          rm -rf "$app"
       - name: Third-party license notices (fails on a license not listed in about.toml)
         if: runner.os == 'Linux'
         run: |

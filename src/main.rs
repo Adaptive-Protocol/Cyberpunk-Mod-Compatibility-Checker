@@ -22,13 +22,19 @@ const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO
     and, on Windows, the version of the Visual C++ runtime.\n\n\
     Crash and freeze reports come from Advanced Crash Reporter by Akiway (nexusmods.com/cyberpunk2077/mods/34403), when it's installed. \
     The app only reads them; none of its code is used.\n\n\
-    Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch \
-    and the rows with coloured status circles. Framework background from the RED Modding wiki (wiki.redmodding.org). The .archive file index layout as documented in WolvenKit (github.com/WolvenKit/WolvenKit); no code was copied. \
+    Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch, \
+    the rows with coloured status circles, and that the archive loaded first wins a shared game file, shown as a win and not a fault. \
+    Framework background and what the Mac game can load from the RED Modding wiki (wiki.redmodding.org); the Mac game's own paths as documented in \
+    cp2077-mac-archive-patcher by brunoformagio (github.com/brunoformagio/cp2077-mac-archive-patcher). \
+    The .archive file index layout as documented in WolvenKit (github.com/WolvenKit/WolvenKit); no code was copied. \
+    Reading a suite core's version from marker modules (DigitalVixenCore.Api4_9_12) follows DigitalVixen's convention for their core. \
     Backing a mod up instead of deleting it follows the reversible disable in mod managers such as Vortex and Mod Organizer 2, \
     and the confirmation that lists every file comes from the maintainer's Nexus Mod Duplication Cleanup. \
     The verdicts, list format and layout are this app's own.\n\n\
-    Built with egui/eframe, rfd, serde and toml. Their licenses are in THIRD-PARTY-NOTICES.txt.\n\n\
-    Started with --launch (from Steam's launch options), it starts the game after the check.\n\n\
+    The Pre-install check reads a mod in memory: .7z with sevenz-rust2, .zip with zip, and FOMOD installers with quick-xml, all pure Rust. \
+    The FOMOD installer format is the modding community's, as Mod Organizer 2 and Vortex implement it. It never installs, extracts, writes or runs anything.\n\n\
+    Built with egui/eframe, rfd, serde, toml, sevenz-rust2, zip and quick-xml. Their licenses are in THIRD-PARTY-NOTICES.txt.\n\n\
+    Started with --launch (from Steam's launch options), it starts the game after the check. On macOS it only reports: no file actions and no launch mode.\n\n\
     The code was written by an AI assistant (Claude, made by Anthropic) at the maintainer's direction.");
 const LAST_TIP: &str = "From the logs of the last time the game ran. They update the next time you launch it.";
 const REMOVE_TIP: &str = "Move it out of the game folder until it's updated, or delete it. You see every file first.";

@@ -770,7 +770,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "cyberpunk-mod-compat-checker"
-version = "1.6.0"
+version = "2.0.0"
 dependencies = [
  "eframe",
  "quick-xml 0.42.0",

@@ -46,30 +46,34 @@ A **Mod entry** with the same name as a red mod's own entry, in another mod fold
 A mod whose scripts build on a red mod: they import a module only that mod declares, or use a class or function it defines in a module they import or add to (EquipmentEx's add-ons add to its module). Without the red mod, redscript can't compile the add-on, which stops every script mod, so Remove offers the add-on and its **Companions** with the mod, marked "builds on X". Mods that build on an add-on count too. An import under `@if(ModuleExists(..))` is optional and doesn't count.
 _Avoid_: dependency (a **Dependent mod** depends on a **Framework**)
 
-**Suite core** (planned, v2.0):
-One mod author's shared base that the rest of their mods need: scripts, strings, data or quest content (e.g. DigitalVixen Core, Deceptious Quest Core). Unlike a **Framework**, it's not on the maintainer's low-level list and isn't tied to a Game build. A script core is recognised by its scripts and may carry a version marker, a module a **Suite mod** imports to require that version; an archive core only by its archive, with a fingerprint per version in the **Compatibility manifest**.
+**Suite core**:
+One mod author's shared base that the rest of their mods need: scripts, strings, data or quest content (e.g. DigitalVixen Core, Deceptious Quest Core). Unlike a **Framework**, it's not on the maintainer's low-level list and isn't tied to a Game build. A script core is recognised by its scripts and may carry a version marker, a module a **Suite mod** imports to require that version; an archive core only by its archive, with a fingerprint per version in the **Net list**.
 _Avoid_: cross core, core mod
 
-**Suite mod** (planned, v2.0):
+**Suite mod**:
 A mod that needs a **Suite core**. It's red when its core is missing, older than it needs, or installed twice; shown grouped under its core.
 
-**Contained**, **Engine-reaching** (planned, v2.0):
+**Contained**, **Engine-reaching**:
 How far a mod reaches. A contained mod only adds its own files and records (Zenitex Core Dependency: its items, stats and store), so it can break only itself and the **Suite mods** that need it. An engine-reaching mod has scripts that change game code, so it can affect other mods and the game. It can be a **Suite core** (DigitalVixen Core, They Will Remember) or an overhaul nothing depends on (Trigger Mode Control, Combat Evolved). The app reads this from the mod's files, and the **Compatibility manifest** can correct it. Every engine-reaching mod is cross-checked against the others for **Overlaps**; a contained mod is checked only within its own suite.
 _Avoid_: isolated, engine-level
 
-**Framework Net** (planned, v2.0):
+**Framework Net**:
 The map of everything other mods stand on. Every **Framework** and every **Suite core** is a point in it, joined by what each one needs and what it clashes with. The app reads it before launch to say whether the installed points work together.
 _Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay separate terms)
 
-**Overlap** (planned, v2.0):
+**Net list** (net.toml, v2.0):
+the maintainer's curated file for the **Framework Net**: each archive **Suite core**, how to find it, what it needs, its versions by fingerprint, its **Suite mods**, and corrections to how far a mod reaches. It has its own schema, separate from the **Compatibility manifest**, because v1.x apps refuse a file with fields they don't know. Built into each release; a newer net.toml next to the app is used instead.
+_Avoid_: manifest v2, compat.toml 2
+
+**Overlap**:
 Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). When one mod replaces a method and another wraps it, both still run, so that is only a detail line inside the replacing mod's row. Two mods wrapping the same method chain safely and aren't shown. Never a verdict.
 _Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
 
-**Pre-install check** (planned, v2.0):
+**Pre-install check**:
 A separate window where the player drops a mod's archive (or chooses it) before installing it. The app reads the **Candidate** in memory and checks it alone against the **Framework Net**, the **Compatibility manifest** and the installed mods, pointing to likely break points by file and line. It never installs, extracts, writes or runs anything. Its result opens with a count, "Will break: N" (red by the **Framework Net**'s rule) or "No certain breaks found", plus the number of notes, and never gives a green or safe verdict, since crashes at runtime can't be seen before launch. The app keeps each **Candidate**'s last result in its own settings, never in the game folder; if that mod later shows a problem, its row says what the pre-check flagged and where. It takes any mod: an **Engine-reaching** **Candidate** gets the full report (methods, records, hooks), a **Contained** one a short check of what it needs and which game files it replaces.
 _Avoid_: sandbox (nothing runs in isolation), test
 
-**Candidate** (planned, v2.0):
+**Candidate**:
 The mod given to the **Pre-install check**: a .7z or .zip archive, or a folder. A .rar isn't opened; the player extracts it and gives the folder. When it has a FOMOD installer, the window shows the installer's options with its defaults ticked, and only the files the player's ticked options would install are checked.
 
 **Back up and remove**:
@@ -113,10 +117,13 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 - Only **Mod entries** inside the game folder can be moved or deleted, never a **Framework**, its **Loader** or the game's own files. A path that leaves the game folder is refused, including one from a drop-in compat.toml.
 - Mods installed with Mod Organizer 2 are never moved: the app says to untick them in MO2.
 - In the **Framework Net** a row is red only for a certain break: something it needs is missing or older than required, a **Suite core** is installed twice, or the **Compatibility manifest** names the clash. An **Overlap** never turns a row red.
-- macOS (planned, v2.0, Apple silicon): the app checks only what the Mac game can load: script imports, mods that need a **Framework** macOS doesn't have, and duplicates. Community ports of **Frameworks** aren't checked, and almost no **Suite core** runs there, so the **Framework Net** is close to empty on a Mac.
+- macOS (v2.0, Apple silicon): the app checks only what the Mac game can load: script imports, mods that need a **Framework** macOS doesn't have, and duplicates. Community ports of **Frameworks** aren't checked, and almost no **Suite core** runs there, so the **Framework Net** is close to empty on a Mac.
 - On macOS the app is read-only: it points to the problem and the fix, with no **Back up and remove**, **Delete** or launch mode, and it never changes the game's own archives. File actions come to macOS only if the maintainer decides so later, after a test on a real Mac install.
 - **Delete** backs up first and then deletes the **Backup**, so a failed move changes nothing.
-- The **Bridge agent** (.claude/agents/compat-bridge.md) writes the **Compatibility manifest**; the utility reads it, offline.
+- The **Bridge agent** (.claude/agents/compat-bridge.md) writes the **Compatibility manifest** and the **Net list**; the utility reads them, offline.
+- A mod's version comes from its own files (a plugin's version resource, a script core's version marker, an archive core's fingerprint) or, for a mod installed with Mod Organizer 2, from the meta.ini MO2 keeps beside it.
+- Mods Vortex deployed are never moved either: the app names the Vortex mod and says to disable it there.
+- The **Pre-install check** reads a **Candidate** with pure-Rust archive readers (sevenz-rust2 for .7z, zip for .zip), in memory, under size and file-count limits, with a progress bar and Cancel. A mod archive dropped onto the app opens it; `--precheck` prints the same result.
 
 ## Flagged ambiguities
 
