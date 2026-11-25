@@ -65,6 +65,13 @@ _Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay
 Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). When one mod replaces a method and another wraps it, both still run, so that is only a detail line inside the replacing mod's row. Two mods wrapping the same method chain safely and aren't shown. Never a verdict.
 _Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
 
+**Pre-install check** (planned, v2.0):
+A separate window where the player drops a mod's archive (or chooses it) before installing it. The app reads the **Candidate** in memory and checks it alone against the **Framework Net**, the **Compatibility manifest** and the installed mods, pointing to likely break points by file and line. It never installs, extracts, writes or runs anything, so a clean result means no certain breaks were found, not that the mod is safe. Aimed at overhauls.
+_Avoid_: sandbox (nothing runs in isolation), test
+
+**Candidate** (planned, v2.0):
+The mod archive given to the **Pre-install check**.
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine
