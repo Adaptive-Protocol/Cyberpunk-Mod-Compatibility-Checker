@@ -989,6 +989,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let exe_v = vi.map(|v| show(v.0, 4));
     let roots: Vec<&Path> = mo2.iter().map(PathBuf::as_path).chain([game]).collect();
     let find = |rel: &str| roots.iter().find_map(|r| resolve(r, rel));
+    let meta: Vec<(Option<String>, Option<u32>)> = roots.iter().map(|r| if *r == game { (None, None) } else { crate::locate::mo2_meta(r) }).collect();
+    let meta_of = |rel: &str| roots.iter().position(|r| resolve(r, rel).is_some()).map_or((None, None), |i| meta[i].clone());   // an MO2 mod's version and id
 
     // For Back up and remove: every mod entry in each root. A red mod's entries are the ones its own paths point into,
     // plus (with `kin`) entries elsewhere that share its name, such as a plugin's scripts. Frameworks are never included.
@@ -1048,6 +1050,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     // the Framework Net: cores, overlaps and the certain breaks among them
     let has = |f: &str| m.framework.iter().find(|e| e.name == f).is_some_and(|e| e.detect.iter().any(|d| find(d).is_some()));
     let mut mods = crate::net::mods(&roots, &entries, &index, &owner, &framework, &env.net);
+    for x in &mut mods { x.version = meta[x.root].0.clone() }
     let fw: BTreeSet<String> = index.iter().filter(|s| framework(&s.unit)).filter_map(|s| s.module.clone()).collect();
     let net = crate::net::net(&mut mods, &env.net, &has, &fw, env.mac);
     for b in &net.breaks {
@@ -1074,7 +1077,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         let fw = i < m.framework.len();
         if e.detect.iter().all(|d| find(d).is_none()) { if fw { state.insert(&e.name, None); } continue }
         installed.push(e);
-        let version = e.detect.first().and_then(|d| find(d)).filter(|p| p.is_file() && ext(p, &["dll", "exe", "asi"])).and_then(|p| pe_version(&p)).map(|(f, _)| show([f[0], f[1], f[2], 0], 3));
+        let version = e.detect.first().and_then(|d| find(d)).filter(|p| p.is_file() && ext(p, &["dll", "exe", "asi"])).and_then(|p| pe_version(&p)).map(|(f, _)| show([f[0], f[1], f[2], 0], 3))
+            .or_else(|| e.detect.first().and_then(|d| meta_of(d).0));
         let folders: Vec<String> = e.detect.iter().filter_map(|d| mod_folder(d)).collect();
         claimed.extend(folders.iter().cloned());
         let refusal = refused.iter().find(|r| folders.contains(&r.folder));
@@ -1125,7 +1129,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         // a file inside a mod is left to the player, and so is a name with a `*`, which would match other mods too
         let whole = unit(&r.folder).as_deref() == Some(r.folder.as_str()) && !r.folder.contains('*');
         let (remove, mo2, vortex) = if whole { pieces(std::slice::from_ref(&r.folder), if r.near { Kin::Beside } else { Kin::Any }) } else { (vec![], vec![], vec![]) };
-        rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2, vortex });
+        let (v, id) = meta_of(&r.folder);
+        rows.push(Row { name: r.name.clone(), nexus_id: id, version: r.version.clone().or(v), status: Red, why: r.why.clone(), notes: vec![], remove, mo2, vortex });
     }
     // Patterns that look inside mod archives: each archive's index is read once, and the game's own copies only if one holds a file
     let looks: Vec<Inner> = m.pattern.iter().flat_map(|p| &p.all).filter_map(|x| inner(x)).collect();
@@ -1765,9 +1770,11 @@ mod tests {
 
         let game = install("remove-mo2-game", [2, 5, 0, 0], &[("red4ext/RED4ext.dll", Some([1, 31, 0, 0])), ("red4ext/plugins/ArchiveXL/ArchiveXL.dll", Some([1, 20, 0, 0]))]);
         let m = install("remove-mo2-Broken Mod", [0; 4], &[("r6/scripts/Broken/b.reds", None)]);
+        fs::write(m.join("meta.ini"), "[General]\nmodid=9\nversion=2.0.1\n").unwrap();
         let r = scan(&Manifest::parse(&list).unwrap(), &game, std::slice::from_ref(&m), &NO_ENV).unwrap();
         let b = r.rows.iter().find(|x| x.name == "Broken").unwrap();
         assert!(b.remove.is_empty() && b.mo2 == [m.file_name().unwrap().to_string_lossy().into_owned()], "MO2's files are left to MO2");
+        assert_eq!(b.version.as_deref(), Some("2.0.1"), "from MO2's meta.ini");
     }
 
     #[test]

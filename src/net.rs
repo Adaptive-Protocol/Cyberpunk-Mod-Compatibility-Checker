@@ -251,7 +251,7 @@ pub fn missing(mods: &[String], declared: &[&str]) -> String {
 
 /// One mod as the Net sees it: its name, where it is (root, as in check.rs), its **Mod entries** and its facts.
 #[derive(Debug, Default)]
-pub struct Mod { pub name: String, pub root: usize, pub entries: Vec<String>, pub facts: Facts, pub reach: Option<(Reach, String)> }   // reach: the list's correction and why
+pub struct Mod { pub name: String, pub root: usize, pub entries: Vec<String>, pub facts: Facts, pub reach: Option<(Reach, String)>, pub version: Option<String> }   // reach: the list's correction and why; version: MO2's
 
 /// A row in the Net's group: a title, whether it's red, and the lines under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -392,16 +392,17 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
     // rows for the cores
     for (&c, us) in &users {
         let m = &mods[c];
-        let v = m.facts.modules.iter().filter_map(|d| marker(d).map(|x| x.1)).max_by(|a, b| cmp_ver(a, b));
+        let v = m.facts.modules.iter().filter_map(|d| marker(d).map(|x| x.1)).max_by(|a, b| cmp_ver(a, b)).map(|v| format!(", version {v} (from its version markers)"))
+            .or_else(|| m.version.as_ref().map(|v| format!(", version {v} (from MO2)")));
         let mut lines: Vec<String> = us.iter().map(|&u| format!("Needed by {}", mods[u].name)).collect();
         lines.sort();
         if let Some((r, why)) = &m.reach { lines.push(format!("The list counts it as {}: {why}", reach(*r))) }
-        n.cores.push(Row { title: format!("{}: script core, {}{}, {}", m.name, reach(m.reach()), v.map_or(String::new(), |v| format!(", version {v} (from its version markers)")), count(us.len(), "suite mod")), lines });
+        n.cores.push(Row { title: format!("{}: script core, {}{}, {}", m.name, reach(m.reach()), v.unwrap_or_default(), count(us.len(), "suite mod")), lines });
     }
     for &(c, core) in &cores {
         let us: Vec<String> = (0..mods.len()).filter(|&i| i != c && suite[i] == Some(c) && !mods[c].entries.iter().all(|e| mods[i].entries.contains(e))).map(|i| format!("Needed by {}", mods[i].name)).collect();
         let r = core.reach.unwrap_or_else(|| mods[c].reach());
-        n.cores.push(Row { title: format!("{}: archive core, {}{}, {}", core.name, reach(r), version(core, &mods[c]).map_or(String::new(), |v| format!(", version {v}")), count(us.len(), "suite mod")), lines: [us, vec![format!("Listed from {}, {}", core.source, core.date)]].concat() });
+        n.cores.push(Row { title: format!("{}: archive core, {}{}, {}", core.name, reach(r), version(core, &mods[c]).map(|v| format!(", version {v}")).or_else(|| mods[c].version.as_ref().map(|v| format!(", version {v} (from MO2)"))).unwrap_or_default(), count(us.len(), "suite mod")), lines: [us, vec![format!("Listed from {}, {}", core.source, core.date)]].concat() });
     }
     n.cores.sort_by_key(|r| r.title.to_lowercase());
     // overlaps: every engine-reaching mod against the others, and contained mods within their own suite

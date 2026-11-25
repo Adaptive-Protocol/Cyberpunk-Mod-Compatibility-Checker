@@ -105,6 +105,13 @@ fn ini(text: &str, key: &str) -> Option<String> {
     Some(v.replace("\\\\", "\\")).filter(|v| !v.is_empty())
 }
 
+/// An MO2 mod's version and Nexus mod id, from the meta.ini MO2 keeps in its folder ("d1.2" is MO2's decimal scheme).
+pub fn mo2_meta(dir: &Path) -> (Option<String>, Option<u32>) {
+    let t = crate::check::read(&dir.join("meta.ini"), 1 << 20).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default();
+    let v = ini(&t, "version").map(|v| v.strip_prefix('d').filter(|r| r.starts_with(|c: char| c.is_ascii_digit())).unwrap_or(&v).to_string());
+    (v.filter(|v| v.bytes().any(|b| (b'1'..=b'9').contains(&b))), ini(&t, "modid").and_then(|i| i.parse().ok()).filter(|&i| i > 0))
+}
+
 fn same_dir(a: &str, b: &Path) -> bool {
     let n = |s: &str| s.replace('\\', "/").trim_end_matches('/').to_lowercase();
     n(a) == n(&b.to_string_lossy())
@@ -245,6 +252,11 @@ mod tests {
         assert_eq!(mo2_mods(&d).unwrap(), [d.join("mods/B"), d.join("mods/A")]);
         fs::create_dir_all(d.join("overwrite")).unwrap();
         assert_eq!(mo2_mods(&d).unwrap()[0], d.join("overwrite"));
+        fs::write(d.join("mods/A/meta.ini"), "[General]\ngameName=cyberpunk2077\nmodid=1511\nversion=d0.5.29\nnewestVersion=0.5.30\n\n[installedFiles]\n1\\modid=1511\n").unwrap();
+        fs::write(d.join("mods/B/meta.ini"), "[General]\nmodid=0\nversion=0.0.0.0\n").unwrap();
+        assert_eq!(mo2_meta(&d.join("mods/A")), (Some("0.5.29".into()), Some(1511)));
+        assert_eq!(mo2_meta(&d.join("mods/B")), (None, None), "MO2 writes zeros when it doesn't know");
+        assert_eq!(mo2_meta(&d.join("mods/C")), (None, None));
     }
 
     #[test]
