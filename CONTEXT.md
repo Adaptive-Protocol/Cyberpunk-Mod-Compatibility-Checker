@@ -65,6 +65,13 @@ _Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay
 Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). When one mod replaces a method and another wraps it, both still run, so that is only a detail line inside the replacing mod's row. Two mods wrapping the same method chain safely and aren't shown. Never a verdict.
 _Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
 
+**Pre-install check** (planned, v2.0):
+A separate window where the player drops a mod's archive (or chooses it) before installing it. The app reads the **Candidate** in memory and checks it alone against the **Framework Net**, the **Compatibility manifest** and the installed mods, pointing to likely break points by file and line. It never installs, extracts, writes or runs anything. Its result opens with a count, "Will break: N" (red by the **Framework Net**'s rule) or "No certain breaks found", plus the number of notes, and never gives a green or safe verdict, since crashes at runtime can't be seen before launch. The app keeps each **Candidate**'s last result in its own settings, never in the game folder; if that mod later shows a problem, its row says what the pre-check flagged and where. It takes any mod: an **Engine-reaching** **Candidate** gets the full report (methods, records, hooks), a **Contained** one a short check of what it needs and which game files it replaces.
+_Avoid_: sandbox (nothing runs in isolation), test
+
+**Candidate** (planned, v2.0):
+The mod given to the **Pre-install check**: a .7z or .zip archive, or a folder. A .rar isn't opened; the player extracts it and gives the folder. When it has a FOMOD installer, the window shows the installer's options with its defaults ticked, and only the files the player's ticked options would install are checked.
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine
