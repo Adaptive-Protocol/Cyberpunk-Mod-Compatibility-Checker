@@ -24,7 +24,7 @@ jobs:
           - os: ubuntu-22.04
             asset: CyberpunkModCompatibilityChecker-linux
             exe: CyberpunkModCompatibilityChecker
-          - os: macos-14                                  # Apple silicon; the Mac app only reports, so it's never signed for file actions
+          - os: macos-15                                  # Apple silicon (macos-14 was retired 2026-11-02); the Mac app only reports, so it's never signed for file actions
             asset: CyberpunkModCompatibilityChecker-macos.zip
             exe: CyberpunkModCompatibilityChecker
     runs-on: ${{ matrix.os }}
