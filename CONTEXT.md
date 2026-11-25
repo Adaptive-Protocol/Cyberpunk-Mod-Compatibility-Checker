@@ -66,7 +66,7 @@ Two installed mods replacing the same game file or the same script method, so on
 _Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
 
 **Pre-install check** (planned, v2.0):
-A separate window where the player drops a mod's archive (or chooses it) before installing it. The app reads the **Candidate** in memory and checks it alone against the **Framework Net**, the **Compatibility manifest** and the installed mods, pointing to likely break points by file and line. It never installs, extracts, writes or runs anything, so a clean result means no certain breaks were found, not that the mod is safe. It takes any mod: an **Engine-reaching** **Candidate** gets the full report (methods, records, hooks), a **Contained** one a short check of what it needs and which game files it replaces.
+A separate window where the player drops a mod's archive (or chooses it) before installing it. The app reads the **Candidate** in memory and checks it alone against the **Framework Net**, the **Compatibility manifest** and the installed mods, pointing to likely break points by file and line. It never installs, extracts, writes or runs anything. Its result opens with a count, "Will break: N" (red by the **Framework Net**'s rule) or "No certain breaks found", plus the number of notes, and never gives a green or safe verdict, since crashes at runtime can't be seen before launch. It takes any mod: an **Engine-reaching** **Candidate** gets the full report (methods, records, hooks), a **Contained** one a short check of what it needs and which game files it replaces.
 _Avoid_: sandbox (nothing runs in isolation), test
 
 **Candidate** (planned, v2.0):
