@@ -53,6 +53,18 @@ _Avoid_: cross core, core mod
 **Suite mod** (planned, v2.0):
 A mod that needs a **Suite core**. It's red when its core is missing, older than it needs, or installed twice; shown grouped under its core.
 
+**Contained**, **Engine-reaching** (planned, v2.0):
+How far a mod reaches. A contained mod only adds its own files and records (Zenitex Core Dependency: its items, stats and store), so it can break only itself and the **Suite mods** that need it. An engine-reaching mod has scripts that change game code, so it can affect other mods and the game. It can be a **Suite core** (DigitalVixen Core, They Will Remember) or an overhaul nothing depends on (Trigger Mode Control, Combat Evolved). The app reads this from the mod's files, and the **Compatibility manifest** can correct it. Every engine-reaching mod is cross-checked against the others for **Overlaps**; a contained mod is checked only within its own suite.
+_Avoid_: isolated, engine-level
+
+**Framework Net** (planned, v2.0):
+The map of everything other mods stand on. Every **Framework** and every **Suite core** is a point in it, joined by what each one needs and what it clashes with. The app reads it before launch to say whether the installed points work together.
+_Avoid_: framework for a **Suite core** (the Net holds both kinds, and they stay separate terms)
+
+**Overlap** (planned, v2.0):
+Two installed mods replacing the same game file or the same script method, so only one of them takes effect. The **Framework Net** shows it as a neutral note naming both, and the winner where it can tell (for archives, the one earlier by name). When one mod replaces a method and another wraps it, both still run, so that is only a detail line inside the replacing mod's row. Two mods wrapping the same method chain safely and aren't shown. Never a verdict.
+_Avoid_: conflict, clash (a clash is a known break the **Compatibility manifest** names as a **Pattern**)
+
 **Back up and remove**:
 Moving a red mod's ticked **Mod entries** into a **Backup** until the mod is updated.
 _Avoid_: disable, uninstall, quarantine
@@ -93,6 +105,9 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 - The utility finds the game folder itself (Steam, GOG, Epic; Windows and Linux), with a folder picker as fallback. If it detects Mod Organizer 2, it also scans the MO2 mods folder (v1).
 - Only **Mod entries** inside the game folder can be moved or deleted, never a **Framework**, its **Loader** or the game's own files. A path that leaves the game folder is refused, including one from a drop-in compat.toml.
 - Mods installed with Mod Organizer 2 are never moved: the app says to untick them in MO2.
+- In the **Framework Net** a row is red only for a certain break: something it needs is missing or older than required, a **Suite core** is installed twice, or the **Compatibility manifest** names the clash. An **Overlap** never turns a row red.
+- macOS (planned, v2.0, Apple silicon): the app checks only what the Mac game can load: script imports, mods that need a **Framework** macOS doesn't have, and duplicates. Community ports of **Frameworks** aren't checked, and almost no **Suite core** runs there, so the **Framework Net** is close to empty on a Mac.
+- On macOS the app is read-only: it points to the problem and the fix, with no **Back up and remove**, **Delete** or launch mode, and it never changes the game's own archives. File actions come to macOS only if the maintainer decides so later, after a test on a real Mac install.
 - **Delete** backs up first and then deletes the **Backup**, so a failed move changes nothing.
 - The **Bridge agent** (.claude/agents/compat-bridge.md) writes the **Compatibility manifest**; the utility reads it, offline.
 
@@ -101,3 +116,4 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 - "update status" / "directed update status" resolved to **Compatibility manifest**.
 - "read-only" (the 2026-10-22 plan) resolved to read-only unless the player asks for a file action (2026-11-04).
 - "cross core" (the 2026-11-08 v2 plan) resolved to **Suite core** and **Suite mod**, since "core mod" isn't a term here and **Framework** means the low-level list.
+- "framework" for Zenitex Core Dependency and DigitalVixen Core (the 2026-11-24 v2 plan) resolved: those are **Suite cores**, and **Framework Net** is the map that holds **Frameworks** and **Suite cores** alike.
