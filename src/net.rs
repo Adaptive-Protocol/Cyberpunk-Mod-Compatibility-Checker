@@ -69,12 +69,12 @@ impl List {
     }
 
     /// The built-in list, or a valid net.toml in `dir` with a later `updated` date, with a warning when one was ignored.
-    pub fn load(dir: Option<&Path>) -> (Self, Option<String>) {
-        let Some(p) = dir.map(|d| d.join("net.toml")).filter(|p| p.is_file()) else { return (BUILT.clone(), None) };
+    pub fn load(dir: Option<&Path>) -> (Self, &'static str, Option<String>) {
+        let Some(p) = dir.map(|d| d.join("net.toml")).filter(|p| p.is_file()) else { return (BUILT.clone(), "built in", None) };
         match read(&p, 4 << 20).ok_or_else(|| "unreadable".to_string()).and_then(|b| Self::parse(&String::from_utf8_lossy(&b))) {
-            Ok(l) if l.updated > BUILT.updated => (l, None),
-            Ok(_) => (BUILT.clone(), Some(format!("{} is older than the built-in Net list, so it was ignored.", p.display()))),
-            Err(e) => (BUILT.clone(), Some(format!("{} couldn't be read ({e}), so the built-in Net list is used.", p.display()))),
+            Ok(l) if l.updated > BUILT.updated => (l, "from the net.toml next to the app", None),
+            Ok(_) => (BUILT.clone(), "built in", Some(format!("{} is older than the built-in Net list, so it was ignored.", p.display()))),
+            Err(e) => (BUILT.clone(), "built in", Some(format!("{} couldn't be read ({e}), so the built-in Net list is used.", p.display()))),
         }
     }
 }

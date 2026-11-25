@@ -53,7 +53,7 @@ struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>, Vec<String>
 
 struct App {
     game: String, mo2: String, filter: String,
-    list: Manifest, net: net::List, source: String, warning: Option<String>,
+    list: Manifest, net: net::List, source: String, net_source: &'static str, warning: Option<String>,
     report: Option<Result<Report, String>>,
     job: Option<Job>,
     theme: Option<ThemePreference>,      // last theme sent to the native title bar
@@ -76,9 +76,9 @@ impl App {
         else if !locate::is_game(Path::new(&game)) && let Some(g) = locate::find_game() { game = g.display().to_string() }
         if mo2.is_empty() && let Some(m) = locate::find_mo2(Path::new(&game)) { mo2 = m.display().to_string() }
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        let (net, w2) = net::List::load(exe_dir().as_deref());
+        let (net, net_source, w2) = net::List::load(exe_dir().as_deref());
         let warning = [warning, w2].into_iter().flatten().reduce(|a, b| format!("{a}\n{b}"));
-        let mut app = Self { game, mo2, filter: String::new(), list, net, source, warning, report: None, job: None, theme: None,
+        let mut app = Self { game, mo2, filter: String::new(), list, net, source, net_source, warning, report: None, job: None, theme: None,
                              removal: None, backups: None, discard: None, obsolete: None, asked: vec![], n_backups: 0, notice: None, auto: launch.is_some(), launch };
         app.rescan();
         app
@@ -541,6 +541,8 @@ impl eframe::App for App {
                     ui.weak("·");
                 }
                 ui.weak(format!("Compatibility list {} ({})", self.list.updated, self.source));
+                ui.weak("·");
+                ui.weak(format!("Net list {} ({})", self.net.updated, self.net_source));
                 if let Some(Ok(Report { last: Some(l), .. })) = &self.report { ui.weak("·"); ui.weak(format!("Last launch {}", l.when)); }
                 if self.job.is_some() { ui.spinner(); }
             });
@@ -586,12 +588,12 @@ fn main() -> eframe::Result {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--report") {          // headless check: --report <game folder> [MO2 instance folder]
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        let (net, w2) = net::List::load(exe_dir().as_deref());
+        let (net, net_source, w2) = net::List::load(exe_dir().as_deref());
         for w in [warning, w2].into_iter().flatten() { eprintln!("{w}") }
         let game = args.get(1).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
         let mods = args.get(2).map_or(Ok(vec![]), |m| locate::mo2_mods(Path::new(m)));
         match mods.and_then(|m| check::check(&list, &net, &game, &m)) {
-            Ok(r) => print!("{}", check::text(&r, &source, &list.updated)),
+            Ok(r) => print!("{}", check::text(&r, &format!("{source}; Net list {}, {net_source}", net.updated), &list.updated)),
             Err(e) => { eprintln!("{e}"); std::process::exit(1) }
         }
         return Ok(());

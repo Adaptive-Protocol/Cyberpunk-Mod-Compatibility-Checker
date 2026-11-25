@@ -381,13 +381,15 @@ fn addons(idx: &[Script], mut gone: Vec<(usize, String)>) -> Vec<(usize, String,
 fn unresolved(idx: &[Script]) -> Vec<(usize, String, Vec<String>)> {
     let decl: HashSet<&str> = idx.iter().filter_map(|s| s.module.as_deref()).collect();
     let under = |a: &str, b: &str| a.strip_prefix(b).is_some_and(|t| t.starts_with('.'));      // "A.B" is under "A"
-    let known = |p: &str| decl.iter().any(|m| *m == p || under(p, m) || under(m, p));
+    // a version marker ("X.Api4_9_14") must be declared itself: an older copy of the core declares X too
+    let mark = |p: &str| p.match_indices('.').map(|(i, _)| &p[..i]).chain([p]).find(|q| crate::net::marker(q).is_some()).map(str::to_string);
+    let known = |p: &str| match mark(p) { Some(q) => decl.iter().any(|m| *m == q || under(m, &q)), None => decl.iter().any(|m| *m == p || under(p, m) || under(m, p)) };
     let mut out: Vec<(usize, String, Vec<String>)> = vec![];
     for s in idx.iter().filter(|s| s.unit.to_ascii_lowercase().starts_with("r6/scripts/")) {
-        for p in s.imports.iter().filter(|p| !p.is_empty() && !known(p)) {
+        for p in s.imports.iter().filter(|p| !p.is_empty() && !known(p)).map(|p| mark(p).unwrap_or_else(|| p.clone())) {
             match out.iter_mut().find(|o| o.0 == s.root && o.1 == s.unit) {
-                Some(o) => if !o.2.contains(p) { o.2.push(p.clone()) },
-                None => out.push((s.root, s.unit.clone(), vec![p.clone()])),
+                Some(o) => if !o.2.contains(&p) { o.2.push(p) },
+                None => out.push((s.root, s.unit.clone(), vec![p])),
             }
         }
     }
@@ -1732,6 +1734,14 @@ mod tests {
         assert!(red()[0].why.contains("It builds on Other.Thing,"));
         put("r6/scripts/Other/t.reds", "module Other\npublic class Thing {}");
         assert!(red().is_empty());
+        // a version marker the installed core doesn't declare yet: the core itself being there isn't enough
+        put("r6/scripts/Core/c.reds", "module Core\npublic class Hub {}");
+        put("r6/scripts/Core/m.reds", "module Core.Api1_2_0");
+        put("r6/scripts/Fits/f.reds", "import Core.Api1_2_0.*");
+        put("r6/scripts/Newer/n.reds", "import Core.Api1_3_0.*\nimport Core.*");
+        let r = red();
+        assert_eq!(r.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Newer"]);
+        assert!(r[0].why.ends_with("It needs Core 1.3.0 or newer (the installed copy goes up to 1.2.0): update or install it, or remove this one too."), "{}", r[0].why);
     }
 
     #[test]
