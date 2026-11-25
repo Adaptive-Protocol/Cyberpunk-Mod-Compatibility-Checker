@@ -107,7 +107,7 @@ The Bridge agent's summary for whoever builds the app: what changed in the list,
 - Mods installed with Mod Organizer 2 are never moved: the app says to untick them in MO2.
 - In the **Framework Net** a row is red only for a certain break: something it needs is missing or older than required, a **Suite core** is installed twice, or the **Compatibility manifest** names the clash. An **Overlap** never turns a row red.
 - macOS (planned, v2.0, Apple silicon): the app checks only what the Mac game can load: script imports, mods that need a **Framework** macOS doesn't have, and duplicates. Community ports of **Frameworks** aren't checked, and almost no **Suite core** runs there, so the **Framework Net** is close to empty on a Mac.
-- The first macOS build is a read-only preview: no **Back up and remove**, **Delete** or launch mode until it has been confirmed on a real Mac install. It never changes the game's own archives.
+- On macOS the app is read-only: it points to the problem and the fix, with no **Back up and remove**, **Delete** or launch mode, and it never changes the game's own archives. File actions come to macOS only if the maintainer decides so later, after a test on a real Mac install.
 - **Delete** backs up first and then deletes the **Backup**, so a failed move changes nothing.
 - The **Bridge agent** (.claude/agents/compat-bridge.md) writes the **Compatibility manifest**; the utility reads it, offline.
 
