@@ -3,6 +3,7 @@
 //! Offline: it never connects to anything. It changes files only when the user asks (remove.rs).
 mod check;
 mod locate;
+mod net;
 mod remove;
 
 use check::{Manifest, Part, Report, Status, count};
@@ -50,7 +51,7 @@ struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>)>, delete: b
 
 struct App {
     game: String, mo2: String, filter: String,
-    list: Manifest, source: String, warning: Option<String>,
+    list: Manifest, net: net::List, source: String, warning: Option<String>,
     report: Option<Result<Report, String>>,
     job: Option<Job>,
     theme: Option<ThemePreference>,      // last theme sent to the native title bar
@@ -73,7 +74,9 @@ impl App {
         else if !locate::is_game(Path::new(&game)) && let Some(g) = locate::find_game() { game = g.display().to_string() }
         if mo2.is_empty() && let Some(m) = locate::find_mo2(Path::new(&game)) { mo2 = m.display().to_string() }
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        let mut app = Self { game, mo2, filter: String::new(), list, source, warning, report: None, job: None, theme: None,
+        let (net, w2) = net::List::load(exe_dir().as_deref());
+        let warning = [warning, w2].into_iter().flatten().reduce(|a, b| format!("{a}\n{b}"));
+        let mut app = Self { game, mo2, filter: String::new(), list, net, source, warning, report: None, job: None, theme: None,
                              removal: None, backups: None, discard: None, obsolete: None, asked: vec![], n_backups: 0, notice: None, auto: launch.is_some(), launch };
         app.rescan();
         app
@@ -82,11 +85,11 @@ impl App {
     /// Scans on a background thread, so a slow drive never freezes the window.
     fn rescan(&mut self) {
         let clean = |s: &str| PathBuf::from(s.trim().trim_matches('"'));   // tolerates a pasted "quoted path"
-        let (game, mo2, list) = (clean(&self.game), clean(&self.mo2), self.list.clone());
+        let (game, mo2, list, net) = (clean(&self.game), clean(&self.mo2), self.list.clone(), self.net.clone());
         if game.as_os_str().is_empty() { return self.report = None }
         self.job = Some(thread::spawn(move || {
             let mods = if mo2.as_os_str().is_empty() { vec![] } else { locate::mo2_mods(&mo2)? };
-            check::check(&list, &game, &mods)
+            check::check(&list, &net, &game, &mods)
         }));
     }
 
@@ -561,10 +564,11 @@ fn main() -> eframe::Result {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--report") {          // headless check: --report <game folder> [MO2 instance folder]
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        if let Some(w) = warning { eprintln!("{w}") }
+        let (net, w2) = net::List::load(exe_dir().as_deref());
+        for w in [warning, w2].into_iter().flatten() { eprintln!("{w}") }
         let game = args.get(1).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
         let mods = args.get(2).map_or(Ok(vec![]), |m| locate::mo2_mods(Path::new(m)));
-        match mods.and_then(|m| check::check(&list, &game, &m)) {
+        match mods.and_then(|m| check::check(&list, &net, &game, &m)) {
             Ok(r) => print!("{}", check::text(&r, &source, &list.updated)),
             Err(e) => { eprintln!("{e}"); std::process::exit(1) }
         }

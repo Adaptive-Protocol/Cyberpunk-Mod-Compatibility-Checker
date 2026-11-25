@@ -1,0 +1,113 @@
+# The Framework Net's list, read by the app (built in, or a newer copy placed next to the exe). Separate from compat.toml,
+# which v1.x apps read and which must stay schema 1 for them (docs/adr/0001-net-list-file.md).
+# Maintained by the bridge agent (.claude/agents/compat-bridge.md) and reviewed by the maintainer.
+#
+# core:     an archive Suite core, which the app can't tell from its files alone. Script cores need no entry: the app
+#           reads which mods import their modules, and their version markers (DigitalVixenCore.Api4_9_14).
+#   detect:   paths (with * in a name) that find the core; two installed copies are red.
+#   needs:    framework names, as in compat.toml.
+#   reach:    "contained" or "engine", to correct what the app reads from the files.
+#   versions: { version, fingerprint }: the fingerprint is the FNV-1a 64 hash of the archive's whole file index, in hex.
+#   suite:    { detect, min }: the Suite mods that need the core, and the lowest core version they work with, if known.
+#   source, date: where the entry was checked.
+# reach:    a correction for any mod: { detect, reach, why }.
+
+schema = 1
+updated = "2026-11-25"
+
+# 2026-11-25: the archive cores on the maintainer's install. Each fingerprint was read from the archive in that version's
+# Nexus download and matches the installed copy. Suite globs are by file name, and only where the author's naming is clear.
+
+[[core]]
+name = "Zenitex Core Dependency"
+nexus_id = 16356
+detect = ["archive/pc/mod/#_scorpion_zenitex_core_dependency.archive"]
+needs = ["ArchiveXL", "TweakXL"]
+reach = "contained"                            # its 2,359-line tweak file defines its own ScorpionTank records
+versions = [{ version = "5.1.8", fingerprint = "3bc6e7f4e6ffee06" }]
+suite = [{ detect = "archive/pc/mod/*scorpion_*.archive" }]
+source = "Nexus download 5.1.8; plan notes 2026-11-24"
+date = "2026-11-25"
+
+[[core]]
+name = "Military Palette Texture Library"      # Zenitex's second shared base, on the same Nexus page
+nexus_id = 16356
+detect = ["archive/pc/mod/#_scorpion_military_palette_texture_library.archive"]
+reach = "contained"
+versions = [{ version = "2.1", fingerprint = "10fec201038609b2" }]
+source = "Nexus download 2.1"
+date = "2026-11-25"
+
+[[core]]
+name = "Deceptious Quest Core"
+nexus_id = 7831
+detect = ["archive/pc/mod/zDeceptiousQuestCore.archive"]
+versions = [{ version = "3.2.0", fingerprint = "ec027f9778e4755a" }, { version = "3.3.3", fingerprint = "8cb16ceb0b6e273c" }]
+source = "Nexus downloads 3.2.0 and 3.3.3"
+date = "2026-11-25"
+
+[[core]]
+name = "Dedra Core"
+nexus_id = 34882
+detect = ["archive/pc/mod/Dedra Core.archive"]
+versions = [{ version = "1.10", fingerprint = "74d027f6b9e1d3d7" }]
+source = "Nexus download 1.10"
+date = "2026-11-25"
+
+[[core]]
+name = "Encore"
+nexus_id = 8413
+detect = ["archive/pc/mod/Encore.archive"]
+versions = [{ version = "3.2.2", fingerprint = "9f6c4013fef9b130" }]
+source = "Nexus download 3.2.2"
+date = "2026-11-25"
+
+[[core]]
+name = "Multicolored Hair Core"
+nexus_id = 21613
+detect = ["archive/pc/mod/mch_multicolored_hair_core.archive"]
+reach = "contained"
+versions = [{ version = "1.0", fingerprint = "7440ef3394e126af" }]
+suite = [{ detect = "archive/pc/mod/mch_*.archive" }]
+source = "Nexus download 1.0; the All In One pack's archives all start with mch_"
+date = "2026-11-25"
+
+[[core]]
+name = "Night City Interactions - Core"
+nexus_id = 5519
+detect = ["archive/pc/mod/NightCityInteractions.archive"]
+versions = [{ version = "4.1.1", fingerprint = "8f350f6e40d4b8f5" }]
+source = "Nexus download 4.1.1"
+date = "2026-11-25"
+
+[[core]]
+name = "Turning Me Red - CORE"
+nexus_id = 18355
+detect = ["archive/pc/mod/BV - Turning Me Red - CORE.archive", "archive/pc/mod/BV - Turning Me Red AMM CORE.archive"]
+reach = "contained"
+versions = [{ version = "2.1", fingerprint = "4d9c638a79849248" }, { version = "1.0 (AMM)", fingerprint = "b42024ced572dd0c" }]
+suite = [{ detect = "r6/tweaks/turning_me_red_*" }]
+source = "Nexus downloads PM CORE 2.1 and AMM CORE 1.0"
+date = "2026-11-25"
+
+[[core]]
+name = "Zwei Custom PMU Pose Packs Core"
+nexus_id = 7165
+detect = ["archive/pc/mod/ZWEI_PMU_2_3_XL_CUSTOM_Core.archive"]
+reach = "contained"
+versions = [{ version = "2.31", fingerprint = "90ba47a11d4b62a5" }]
+source = "Nexus download 2.31"
+date = "2026-11-25"
+
+[[core]]
+name = "Avacore"                               # no Nexus download on the maintainer's PC to read a version from
+detect = ["archive/pc/mod/##_Avacore.archive"]
+source = "installed copy"
+date = "2026-11-25"
+
+[[core]]
+name = "Halvkyrie UniqueEyes Core"
+detect = ["archive/pc/mod/00_Halvkyrie_UniqueEyes_Core_*.archive"]
+reach = "contained"
+source = "installed copy"
+date = "2026-11-25"

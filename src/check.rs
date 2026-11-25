@@ -2,7 +2,7 @@
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use crate::remove::Backup;
 use serde::Deserialize;
-use std::{cmp::Ordering, collections::{BTreeMap, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
+use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
 
 pub const BUILT_IN: &str = include_str!("../compat.toml");
 /// The built-in list, parsed once.
@@ -103,14 +103,14 @@ impl Manifest {
 }
 
 /// At most `cap` bytes of a file, so an oversized file can't exhaust memory.
-fn read(path: &Path, cap: u64) -> Option<Vec<u8>> {
+pub fn read(path: &Path, cap: u64) -> Option<Vec<u8>> {
     let mut b = vec![];
     fs::File::open(path).ok()?.take(cap).read_to_end(&mut b).ok()?;
     Some(b)
 }
 
 /// The game's hash of a path inside an .archive: FNV-1a 64 of the lowercase path with backslashes.
-fn hash(p: &str) -> u64 { p.to_lowercase().replace('/', "\\").bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)) }
+pub fn hash(p: &str) -> u64 { p.to_lowercase().replace('/', "\\").bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)) }
 
 /// A game file inside archives: (their folder, a glob for their names, the file's hash).
 type Inner = (String, String, u64);
@@ -180,7 +180,7 @@ fn show(v: [u64; 4], min: usize) -> String {
 }
 
 /// Does `name` match `pat`, where `*` stands for any run of characters? Case-insensitive.
-fn wild(pat: &str, name: &str) -> bool {
+pub fn wild(pat: &str, name: &str) -> bool {
     let (pat, name) = (pat.to_lowercase(), name.to_lowercase());
     let mut bits: Vec<&str> = pat.split('*').collect();
     let first = bits.remove(0);
@@ -191,7 +191,7 @@ fn wild(pat: &str, name: &str) -> bool {
 }
 
 /// `rel` under `root`, matching names without regard to case (mods are made on Windows; Linux folders are case-sensitive).
-fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
+pub fn resolve(root: &Path, rel: &str) -> Option<PathBuf> {
     let mut p = root.to_path_buf();
     for part in rel.split(['/', '\\']).filter(|s| !s.is_empty()) {
         if part == "." || part == ".." { return None }
@@ -220,22 +220,34 @@ pub fn unit(rel: &str) -> Option<String> {
 }
 
 /// The name a mod entry goes by, for finding its other parts: "archive/pc/mod/X.archive.xl" and "r6/scripts/X" -> "x".
-fn key(unit: &str) -> String { unit.rsplit('/').next().unwrap_or("").split('.').next().unwrap_or("").to_lowercase() }
+pub fn key(unit: &str) -> String { unit.rsplit('/').next().unwrap_or("").split('.').next().unwrap_or("").to_lowercase() }
 
-fn files(dir: &Path) -> impl Iterator<Item = PathBuf> + use<> { fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) }
-fn name(p: &Path) -> String { p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()) }
+pub fn files(dir: &Path) -> impl Iterator<Item = PathBuf> + use<> { fs::read_dir(dir).into_iter().flatten().flatten().map(|e| e.path()) }
+pub fn name(p: &Path) -> String { p.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()) }
 /// Does `p` end in one of `exts`, such as "dll", in any case?
-fn ext(p: &Path, exts: &[&str]) -> bool { p.extension().is_some_and(|x| exts.iter().any(|e| x.eq_ignore_ascii_case(e))) }
+pub fn ext(p: &Path, exts: &[&str]) -> bool { p.extension().is_some_and(|x| exts.iter().any(|e| x.eq_ignore_ascii_case(e))) }
 
-/// A redscript file, for finding the add-ons that build on a mod: its root and **Mod entry**, the module it declares,
-/// the modules it has to import (not those under `@if(ModuleExists(..))`), the classes and functions it defines, and
-/// every name its code uses.
-struct Script { root: usize, unit: String, module: Option<String>, imports: Vec<String>, defs: Vec<String>, names: HashSet<String> }
+/// What a mod's script does to a class's method or field: replaces it, wraps it (runs around it), or adds one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hook { Replace, Wrap, Add, Field }
 
-/// A .reds file's (module, imports, defs, names). Comments and strings are blanked first, so an `import` or a name
-/// inside them doesn't count.
-fn reds(t: &str) -> (Option<String>, Vec<String>, Vec<String>, HashSet<String>) {
-    let (mut code, mut it) = (String::with_capacity(t.len()), t.trim_start_matches('\u{feff}').chars().peekable());
+/// A redscript file's facts: the module it declares, the modules it has to import (not those under
+/// `@if(ModuleExists(..))`) with their lines, the modules it probes for, the classes and functions it defines, every
+/// name its code uses, and the methods it replaces, wraps or adds ("Class.Method", with the line).
+#[derive(Default, Debug)]
+pub struct Reds {
+    pub module: Option<String>, pub imports: Vec<String>, pub lines: Vec<usize>, pub probes: Vec<String>,
+    pub defs: Vec<String>, pub names: HashSet<String>, pub hooks: Vec<(Hook, String, usize)>,
+}
+
+/// A redscript file in the install: its root, **Mod entry** and path, and its facts.
+pub struct Script { pub root: usize, pub unit: String, pub file: String, pub r: Reds }
+impl std::ops::Deref for Script { type Target = Reds; fn deref(&self) -> &Reds { &self.r } }
+
+/// Reads a .reds file. Comments and strings are blanked first (keeping lines), so an `import` or a name inside them
+/// doesn't count; a string is kept only as the module a `ModuleExists(..)` probes for.
+pub fn reds(t: &str) -> Reds {
+    let (mut code, mut it, mut probes) = (String::with_capacity(t.len()), t.trim_start_matches('\u{feff}').chars().peekable(), vec![]);
     while let Some(c) = it.next() {
         match (c, it.peek()) {
             ('/', Some('/')) => { it.by_ref().find(|&c| c == '\n'); code.push('\n') }
@@ -249,66 +261,85 @@ fn reds(t: &str) -> (Option<String>, Vec<String>, Vec<String>, HashSet<String>) 
                 }
             }
             ('"', _) => {
-                let mut esc = false;
+                let (mut esc, mut s) = (false, String::new());
                 for c in it.by_ref() {
                     if c == '\n' { code.push('\n'); break }
                     if c == '"' && !esc { break }
                     esc = c == '\\' && !esc;
+                    s.push(c);
                 }
+                if code.trim_end().ends_with("ModuleExists(") { probes.push(s) }
                 code.push(' ');
             }
             _ => code.push(c),
         }
     }
     let path = |s: &str| s.trim_start().split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.')).next().unwrap_or("").trim_end_matches('.').to_string();
-    let (mut module, mut imports, mut guarded) = (None, vec![], false);
-    for l in code.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    let mut r = Reds { probes, ..Default::default() };
+    let mut guarded = false;
+    for (n, l) in code.lines().enumerate().map(|(n, l)| (n + 1, l.trim())).filter(|(_, l)| !l.is_empty()) {
         let after = |w: &str| l.strip_prefix(w).filter(|r| r.starts_with(char::is_whitespace)).map(path);
-        if module.is_none() { module = after("module") }
-        if !guarded && let Some(p) = after("import") { imports.push(p) }
+        if r.module.is_none() { r.module = after("module") }
+        if !guarded && let Some(p) = after("import") { r.imports.push(p); r.lines.push(n) }
         guarded = l.starts_with("@if(") && !l.contains("import");      // an optional import: compiles without the module
     }
-    let (b, mut toks, mut i) = (code.as_bytes(), vec![], 0);
+    let (b, mut toks, mut i, mut line) = (code.as_bytes(), vec![], 0, 1);
     while i < b.len() {
         let s = i;
         if b[i].is_ascii_alphabetic() || b[i] == b'_' {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') { i += 1 }
-            toks.push(&code[s..i]);
-        } else { if b"{}@".contains(&b[i]) { toks.push(&code[i..=i]) } i += 1 }
+            toks.push((&code[s..i], line));
+        } else { if b"{}@".contains(&b[i]) { toks.push((&code[i..=i], line)) } if b[i] == b'\n' { line += 1 } i += 1 }
     }
     let word = |t: &str| !b"{}@".contains(&t.as_bytes()[0]);
-    let (mut defs, mut depth, mut method) = (vec![], 0usize, false);   // method: the next func wraps, replaces or adds a method
-    for (k, t) in toks.iter().enumerate() {
-        let next = toks.get(k + 1).filter(|n| word(n)).map(ToString::to_string);
-        match *t {
+    let (mut depth, mut method, mut hook) = (0usize, false, None);   // method: the next func wraps, replaces or adds a method
+    for (k, &(t, at)) in toks.iter().enumerate() {
+        let next = toks.get(k + 1).map(|n| n.0).filter(|n| word(n)).map(ToString::to_string);
+        match t {
             "{" => depth += 1,
             "}" => depth = depth.saturating_sub(1),
-            "@" => method |= next.is_some_and(|a| ["Method", "Global", "Constructor"].into_iter().any(|s| a.ends_with(s))),
-            "class" | "struct" | "enum" => defs.extend(next),
-            "func" => { if depth == 0 && !method { defs.extend(next) } method = false }
+            "@" => {
+                method |= next.as_ref().is_some_and(|a| ["Method", "Global", "Constructor", "Field"].into_iter().any(|s| a.ends_with(s)));
+                let class = || toks.get(k + 2).map(|n| n.0).filter(|n| word(n) && !["public", "private", "protected", "func", "cb", "final", "static"].contains(n));
+                hook = match next.as_deref() {
+                    Some("replaceMethod" | "replaceGlobal") => Some((Hook::Replace, class(), at)),
+                    Some("wrapMethod" | "wrapGlobal" | "wrapConstructor") => Some((Hook::Wrap, class(), at)),
+                    Some("addMethod") => Some((Hook::Add, class(), at)),
+                    Some("addField") => Some((Hook::Field, class(), at)),
+                    _ => hook,
+                };
+            }
+            "class" | "struct" | "enum" => r.defs.extend(next),
+            "func" | "let" | "var" if depth == 0 => {
+                if let (Some((h, c, at)), Some(n)) = (hook.take(), &next) { r.hooks.push((h, c.map_or_else(|| n.clone(), |c| format!("{c}.{n}")), at)) }
+                let native = toks[k.saturating_sub(3)..k].iter().any(|p| p.0 == "native" || p.0 == "importonly");   // declares the game's own
+                if t == "func" && !method && !native { r.defs.extend(next) }
+                method = false;
+            }
             _ => {}
         }
     }
-    (module, imports, defs, toks.into_iter().filter(|t| word(t)).map(str::to_string).collect())
+    r.names = toks.into_iter().map(|t| t.0).filter(|t| word(t)).map(str::to_string).collect();
+    r
 }
 
 /// Calls `f` with every file under `d`, at most 8 folders deep. Links aren't followed.
-fn walk(d: &Path, depth: u8, f: &mut dyn FnMut(PathBuf)) {
+pub fn walk(d: &Path, depth: u8, f: &mut dyn FnMut(PathBuf)) {
     for e in fs::read_dir(d).into_iter().flatten().flatten() {
         match e.file_type() { Ok(t) if t.is_dir() && depth < 8 => walk(&e.path(), depth + 1, f), Ok(t) if t.is_file() => f(e.path()), _ => {} }
     }
 }
 
 /// Every redscript file in each root: in r6/scripts, and in RED4ext plugin folders, which hold scripts too (Codeware's).
-fn scripts(roots: &[&Path]) -> Vec<Script> {
+pub fn scripts(roots: &[&Path]) -> Vec<Script> {
     let mut v = vec![];
     for (root, r) in roots.iter().enumerate() {
         for d in ["r6/scripts", "red4ext/plugins"].into_iter().filter_map(|d| resolve(r, d)) {
             walk(&d, 0, &mut |p: PathBuf| {
                 if !ext(&p, &["reds"]) { return }
                 let Some(entry) = p.strip_prefix(r).ok().and_then(|x| unit(&x.to_string_lossy())) else { return };
-                let (module, imports, defs, names) = reds(&String::from_utf8_lossy(&read(&p, 8 << 20).unwrap_or_default()));
-                v.push(Script { root, unit: entry, module, imports, defs, names });
+                let file = p.strip_prefix(r).map_or_else(|_| String::new(), |x| x.to_string_lossy().replace('\\', "/"));
+                v.push(Script { root, unit: entry, file, r: reds(&String::from_utf8_lossy(&read(&p, 8 << 20).unwrap_or_default())) });
             });
         }
     }
@@ -441,7 +472,7 @@ fn older(r: &str, exe: &str) -> &'static str { if cmp_ver(r, exe).is_lt() { "an 
 pub fn count(n: usize, noun: &str) -> String { format!("{n} {noun}{}", if n == 1 { "" } else { "s" }) }
 
 /// "a", "a and b", "a, b and c"
-fn list(v: &[String]) -> String { match v { [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")), _ => v.concat() } }
+pub fn list(v: &[String]) -> String { match v { [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")), _ => v.concat() } }
 
 /// One redscript error: (code, file, message), such as ("UNRESOLVED_IMPORT", "a.reds", "module 'X' has no members or does not exist").
 type Fault<'a> = (&'a str, &'a str, &'a str);
@@ -887,10 +918,12 @@ fn updated(roots: &[&Path], entries: &[Vec<String>], backups: Vec<Backup>) -> Ve
 pub struct Env {
     pub vc: Option<Option<String>>,     // see vc_runtime
     pub wine: Option<Vec<String>>,      // DLLs Wine loads from the game folder (Linux, Steam/Proton); None if unknown
+    pub net: crate::net::List,          // the Framework Net's list
+    pub mac: bool,                      // the Mac game: read-only, and only what it can load is checked
 }
 
 impl Env {
-    pub fn of(game: &Path) -> Self { Self { vc: vc_runtime(), wine: crate::locate::wine_overrides(game) } }
+    pub fn of(game: &Path, net: crate::net::List) -> Self { Self { vc: vc_runtime(), wine: crate::locate::wine_overrides(game), net, mac: cfg!(target_os = "macos") } }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -910,6 +943,7 @@ pub struct Row {
     pub name: String, pub nexus_id: Option<u32>, pub version: Option<String>, pub status: Status, pub why: String, pub notes: Vec<Note>,
     pub remove: Vec<(String, Part)>,    // red mods: its entries in the game folder, then those of the add-ons that build on it
     pub mo2: Vec<String>,               // red mods: the Mod Organizer 2 mods that hold its files or such an add-on
+    pub vortex: Vec<String>,            // red mods: the Vortex mods that hold them, to disable there
 }
 
 pub struct Report {
@@ -923,7 +957,13 @@ pub struct Report {
     pub crash_reporter: bool,       // Advanced Crash Reporter is installed: without it no crash is ever seen
     pub updated: Vec<Updated>,      // backups whose mods have a newer version installed
     pub vortex: bool,               // Vortex deployed mods into the game folder
+    pub net: crate::net::Net,       // the Framework Net: cores, overlaps and details
+    pub mac: bool,                  // the Mac game, checked read-only
 }
+
+/// What the app checks on a Mac, where only redscript runs.
+pub const MAC_NOTE: &str = "macOS: this app only reports here, and never moves or deletes anything. The Mac game runs redscript but no other framework, \
+so it checks script imports, mods that need a framework macOS doesn't have, and mods installed twice.";
 
 /// Advanced Crash Reporter's Nexus mod ID, for the note shown when it isn't installed.
 pub const CRASH_REPORTER: u32 = 34403;
@@ -933,14 +973,16 @@ and a crash at one scene or place usually comes from a mod that changes what loa
 Install it, crash once more, then rescan.";
 
 /// Checks the game folder, plus any Mod Organizer 2 mod folders (each laid over the game folder), against the manifest.
-pub fn check(m: &Manifest, game: &Path, mo2: &[PathBuf]) -> Result<Report, String> { scan(m, game, mo2, &Env::of(game)) }
+pub fn check(m: &Manifest, net: &crate::net::List, game: &Path, mo2: &[PathBuf]) -> Result<Report, String> { scan(m, game, mo2, &Env::of(game, net.clone())) }
 
 pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Report, String> {
     use Status::*;
-    let exe = resolve(game, "bin/x64/Cyberpunk2077.exe")
-        .ok_or_else(|| format!("Cyberpunk2077.exe wasn't found in {}. Choose the folder that holds bin, archive and r6.", game.display()))?;
-    let vi = pe_version(&exe);
-    let build = vi.map(|v| show(v.1, 2));
+    let exe = resolve(game, "bin/x64/Cyberpunk2077.exe");
+    if exe.is_none() && !(env.mac && crate::locate::is_game(game)) {
+        return Err(format!("Cyberpunk2077.exe wasn't found in {}. Choose the folder that holds bin, archive and r6.", game.display()))
+    }
+    let vi = exe.as_deref().and_then(pe_version);
+    let build = vi.map(|v| show(v.1, 2)).or_else(|| env.mac.then(|| crate::locate::mac_build(game)).flatten());
     let exe_v = vi.map(|v| show(v.0, 4));
     let roots: Vec<&Path> = mo2.iter().map(PathBuf::as_path).chain([game]).collect();
     let find = |rel: &str| roots.iter().find_map(|r| resolve(r, rel));
@@ -953,7 +995,9 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     // A framework's entries, and its other entries by name (such as r6/scripts/Audioware), even when a newer list leaves it out
     let protect: Vec<String> = m.framework.iter().chain(&BUILT.framework).flat_map(|e| e.detect.iter().chain(&e.parts)).filter_map(|d| unit(d)).collect();
     let framework = |u: &str| protect.iter().any(|p| wild(p, u) || wild(&key(p), &key(u)));
-    let mut last = exe_v.as_deref().and_then(|e| last_launch(&roots, e, &framework, &entries));
+    let vortex = crate::locate::vortex(game);                        // entry -> the Vortex mod that deployed it
+    let owner = |u: &str| vortex.get(&u.to_lowercase()).cloned();
+    let mut last = exe_v.as_deref().filter(|_| !env.mac).and_then(|e| last_launch(&roots, e, &framework, &entries));
     let dir = |u: &str| u.rsplit_once('/').map_or(String::new(), |x| x.0.to_lowercase());
     let matching = |own: &[String], kin: Kin| {                     // (root, entry, own?), its own first
         let keys: Vec<(String, String)> = own.iter().map(|u| (key(u), dir(u))).filter(|k| !k.0.is_empty()).collect();
@@ -981,19 +1025,30 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
                 else { found.push((r, u, by)) }
             }
         }
-        let (mut here, mut mo2): (Vec<(String, Part)>, Vec<String>) = (vec![], vec![]);
+        let (mut here, mut mo2, mut vtx): (Vec<(String, Part)>, Vec<String>, Vec<String>) = (vec![], vec![], vec![]);
         for (r, u, part) in found {
             if r != g { if !mo2.contains(&name(roots[r])) { mo2.push(name(roots[r])) } }
+            else if let Some(o) = owner(&u) { if !vtx.contains(&o) { vtx.push(o) } }   // Vortex would put it back: disable it there
             else if !here.iter().any(|(h, _)| *h == u) { here.push((u, part)) }
         }
-        (here, mo2)
+        (here, mo2, vtx)
     };
     let mut refused = vi.map_or(vec![], |v| wrong_runtime(&roots, v.0));
     for r in last.iter().flat_map(|l| &l.refused) { if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r.clone()) } }
+    let declared: Vec<&str> = index.iter().filter_map(|s| s.module.as_deref()).collect();
     for (_, u, mods) in unresolved(&index).into_iter().filter(|(_, u, _)| !framework(u)) {
         let n = u.rsplit('/').next().unwrap_or(&u);
         let r = Refused { folder: u.to_lowercase(), name: n.strip_suffix(".reds").unwrap_or(n).to_string(), version: None, near: false, why: format!(
-            "redscript will fail to compile it at your next launch, which stops every script mod. It builds on {}, which no installed mod provides: install or put back the mod that does, or remove this one too.", list(&mods)) };
+            "redscript will fail to compile it at your next launch, which stops every script mod. {}", crate::net::missing(&mods, &declared)) };
+        if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r) }
+    }
+    // the Framework Net: cores, overlaps and the certain breaks among them
+    let has = |f: &str| m.framework.iter().find(|e| e.name == f).is_some_and(|e| e.detect.iter().any(|d| find(d).is_some()));
+    let mut mods = crate::net::mods(&roots, &entries, &index, &owner, &framework, &env.net);
+    let fw: BTreeSet<String> = index.iter().filter(|s| framework(&s.unit)).filter_map(|s| s.module.clone()).collect();
+    let net = crate::net::net(&mut mods, &env.net, &has, &fw, env.mac);
+    for b in &net.breaks {
+        let r = Refused { folder: b.entry.to_lowercase(), name: b.name.clone(), version: None, near: false, why: b.why.clone() };
         if !refused.iter().any(|x| x.folder == r.folder) { refused.push(r) }
     }
 
@@ -1012,7 +1067,7 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let mut state: BTreeMap<&str, Option<Status>> = BTreeMap::new();   // framework -> status, None = not installed
     let (mut rows, mut installed) = (vec![], vec![]);                  // installed: the entries that have a row
     let mut claimed: Vec<String> = vec![];                             // plugin folders that have a row
-    for (i, e) in m.entries().enumerate() {
+    for (i, e) in m.entries().enumerate().filter(|_| !env.mac) {      // the Mac game loads no framework but redscript
         let fw = i < m.framework.len();
         if e.detect.iter().all(|d| find(d).is_none()) { if fw { state.insert(&e.name, None); } continue }
         installed.push(e);
@@ -1046,8 +1101,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
             else if let Some(n) = need(Some(Gray)) { (Gray, format!("Needs {n}, which isn't confirmed.")) }
             else { (Green, format!("OK for game {b}.")) };
         if fw { state.insert(&e.name, Some(status)); }
-        let (remove, mo2) = if status == Red && !fw { pieces(&[&e.detect[..], &e.parts[..]].concat(), Kin::Any) } else { (vec![], vec![]) };
-        rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes, remove, mo2 });
+        let (remove, mo2, vortex) = if status == Red && !fw { pieces(&[&e.detect[..], &e.parts[..]].concat(), Kin::Any) } else { (vec![], vec![], vec![]) };
+        rows.push(Row { name: e.name.clone(), nexus_id: Some(e.nexus_id), version, status, why, notes, remove, mo2, vortex });
     }
     // Advanced Crash Reporter blames the framework a crash passed through, which is often a bystander: say so when it's fine
     if let Some((c, _)) = last.as_mut().and_then(|l| l.crash.as_mut()) && entry.is_some() && !c.contains("ran out of memory")
@@ -1055,17 +1110,19 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         *c += &format!(" {} itself matches the list for game {b}, so a mod that uses it is the likelier cause.", f.name);
     }
     for f in &m.framework {                                  // missing frameworks matter only when something installed needs them
-        let users: Vec<&str> = installed.iter().filter(|e| e.needs.contains(&f.name)).map(|e| e.name.as_str()).collect();
+        let mut users: Vec<String> = installed.iter().filter(|e| e.needs.contains(&f.name)).map(|e| e.name.clone()).collect();
+        let more = mods.iter().filter(|x| x.facts.uses.contains(f.name.as_str()) && !users.contains(&x.name)).count();   // from their file types
+        if more > 0 { users.push(if users.is_empty() { count(more, "mod") } else { format!("{more} more") }) }
         if state.get(f.name.as_str()).is_some_and(Option::is_none) && !users.is_empty() {
-            rows.push(Row { name: f.name.clone(), nexus_id: Some(f.nexus_id), version: None, status: Red, notes: vec![], remove: vec![], mo2: vec![],
-                            why: format!("Not installed, but {} need{} it.", users.join(", "), if users.len() == 1 { "s" } else { "" }) });
+            rows.push(Row { name: f.name.clone(), nexus_id: Some(f.nexus_id), version: None, status: Red, notes: vec![], remove: vec![], mo2: vec![], vortex: vec![],
+                            why: format!("Not installed, but {} need{} it.", list(&users), if users.len() == 1 && more <= 1 { "s" } else { "" }) });
         }
     }
     for r in refused.iter().filter(|r| !claimed.contains(&r.folder)) {   // unlisted mods the last launch shows broken
         // a file inside a mod is left to the player, and so is a name with a `*`, which would match other mods too
         let whole = unit(&r.folder).as_deref() == Some(r.folder.as_str()) && !r.folder.contains('*');
-        let (remove, mo2) = if whole { pieces(std::slice::from_ref(&r.folder), if r.near { Kin::Beside } else { Kin::Any }) } else { (vec![], vec![]) };
-        rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2 });
+        let (remove, mo2, vortex) = if whole { pieces(std::slice::from_ref(&r.folder), if r.near { Kin::Beside } else { Kin::Any }) } else { (vec![], vec![], vec![]) };
+        rows.push(Row { name: r.name.clone(), nexus_id: None, version: r.version.clone(), status: Red, why: r.why.clone(), notes: vec![], remove, mo2, vortex });
     }
     // Patterns that look inside mod archives: each archive's index is read once, and the game's own copies only if one holds a file
     let looks: Vec<Inner> = m.pattern.iter().flat_map(|p| &p.all).filter_map(|x| inner(x)).collect();
@@ -1084,8 +1141,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
         if !p.all.iter().all(|x| inner(x).is_some() || find(x).is_some()) || p.none.iter().any(|x| find(x).is_some()) { continue }
         let deep: Vec<Inner> = p.all.iter().filter_map(|x| inner(x)).collect();
         if deep.is_empty() {
-            let (remove, mo2) = pieces(&p.remove, Kin::No);
-            rows.push(Row { name: p.name.clone(), nexus_id: p.nexus_id, version: None, status: Red, notes: vec![], remove, mo2,
+            let (remove, mo2, vortex) = pieces(&p.remove, Kin::No);
+            rows.push(Row { name: p.name.clone(), nexus_id: p.nexus_id, version: None, status: Red, notes: vec![], remove, mo2, vortex,
                             why: format!("{} ({}, {})", p.text, p.source, p.date) });
             continue
         }
@@ -1096,9 +1153,9 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
             if flagged.contains(&(*r, rel.as_str())) { continue }
             flagged.push((*r, rel));
             let day = |t: i64| crate::remove::date(t / 864_000_000_000 - 134_774);       // FILETIME counts 100 ns from 1601
-            let (remove, mo2) = pieces(std::slice::from_ref(rel), Kin::Any);
+            let (remove, mo2, vortex) = pieces(std::slice::from_ref(rel), Kin::Any);
             let file = rel.rsplit('/').next().unwrap_or(rel);
-            rows.push(Row { name: file.rsplit_once('.').map_or(file, |x| x.0).to_string(), nexus_id: None, version: None, status: Red, notes: vec![], remove, mo2,
+            rows.push(Row { name: file.rsplit_once('.').map_or(file, |x| x.0).to_string(), nexus_id: None, version: None, status: Red, notes: vec![], remove, mo2, vortex,
                             why: format!("{} Its copy is from {}, the game's from {} ({}, {}).", p.text, day(old[0].0), day(old[0].1), p.source, p.date) });
         }
     }
@@ -1120,7 +1177,8 @@ pub fn scan(m: &Manifest, game: &Path, mo2: &[PathBuf], env: &Env) -> Result<Rep
     let crash_reporter = ["bin/x64/plugins/AdvancedCrashReporter.asi", "bin/x64/plugins/AdvancedCrashReporter"].iter().any(|p| find(p).is_some());
     let updated = updated(&roots, &entries, crate::remove::list(game));
     let vortex = ["", "archive/pc/mod"].iter().filter_map(|d| resolve(game, d)).flat_map(|d| files(&d)).any(|f| name(&f).to_lowercase().starts_with("vortex.deployment"));
-    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter, updated, vortex })
+    let banner = if env.mac { Some((false, MAC_NOTE.to_string())) } else { banner };
+    Ok(Report { game: game.to_path_buf(), build, exe: exe_v, banner, rows, unlisted, last, crash_reporter: crash_reporter || env.mac, updated, vortex, net, mac: env.mac })
 }
 
 /// Plain-text report, for `--report` and the tests.
@@ -1142,8 +1200,16 @@ pub fn text(r: &Report, source: &str, updated: &str) -> String {
         let take = |(p, k): &(String, Part)| match k { Part::Uses(b) => format!("{p} (builds on {b})"), _ => p.clone() };
         if !x.remove.is_empty() { s += &format!("\tcan remove: {}\n", x.remove.iter().map(take).collect::<Vec<_>>().join(", ")) }
         if !x.mo2.is_empty() { s += &format!("\tin Mod Organizer 2: {}\n", x.mo2.join(", ")) }
+        if !x.vortex.is_empty() { s += &format!("\tin Vortex: {}\n", x.vortex.join(", ")) }
     }
     if !r.unlisted.is_empty() { s += &format!("Unlisted native plugins: {}\n", r.unlisted.join(", ")) }
+    let n = &r.net;
+    if !(n.cores.is_empty() && n.overlaps.is_empty() && n.details.is_empty()) {
+        s += &format!("Framework Net: {}, {}, {} engine-reaching\n", count(n.cores.len(), "core"), count(n.overlaps.len(), "overlap"), n.engine);
+        for (tag, rows) in [("core", &n.cores), ("overlap", &n.overlaps), ("detail", &n.details)] {
+            for x in rows { s += &format!("\t{tag}: {}\n", x.title); for l in &x.lines { s += &format!("\t\t{l}\n") } }
+        }
+    }
     for u in &r.updated {
         s += &format!("Updated since its backup: {} ({})\n", u.backup.name, u.backup.dir.display());
         for (old, new) in &u.newer { s += &format!("\t{old} -> {new}\n") }
@@ -1212,7 +1278,7 @@ mod tests {
         notes = [{ build = "2.5", text = "Flickers at night", source = "Nexus comments", date = "2026-11-04" }]
     "#;
 
-    const NO_ENV: Env = Env { vc: None, wine: None };
+    const NO_ENV: Env = Env { vc: None, wine: None, net: crate::net::List::EMPTY, mac: false };
 
     fn run(list: &str, game: [u16; 4], files: &[(&str, Option<[u16; 4]>)], name: &str, env: &Env) -> (Report, Vec<(String, Status)>) {
         let r = scan(&Manifest::parse(list).unwrap(), &install(name, game, files), &[], env).unwrap();
@@ -1343,11 +1409,11 @@ mod tests {
         assert!(status(&NO_ENV, &files, "ArchiveXL").1.contains("Needs RED4ext, which is likely to break"));
         let all = [&files[..], &[("bin/x64/winmm.dll", None)]].concat();
         assert_eq!(status(&NO_ENV, &all, "RED4ext").0, Status::Green);
-        let old_vc = Env { vc: Some(Some("14.38.33135".into())), wine: None };
+        let old_vc = Env { vc: Some(Some("14.38.33135".into())), wine: None, ..NO_ENV };
         assert!(status(&old_vc, &all, "CET").1.contains("this PC has 14.38.33135"));
-        assert!(status(&Env { vc: Some(None), wine: None }, &all, "CET").1.contains("isn't installed"));
-        assert_eq!(status(&Env { vc: Some(Some("14.42.34433".into())), wine: None }, &all, "CET").0, Status::Green);
-        let wine = |w: &[&str]| Env { vc: None, wine: Some(w.iter().map(|s| s.to_string()).collect()) };
+        assert!(status(&Env { vc: Some(None), wine: None, ..NO_ENV }, &all, "CET").1.contains("isn't installed"));
+        assert_eq!(status(&Env { vc: Some(Some("14.42.34433".into())), wine: None, ..NO_ENV }, &all, "CET").0, Status::Green);
+        let wine = |w: &[&str]| Env { vc: None, wine: Some(w.iter().map(|s| s.to_string()).collect()), ..NO_ENV };
         assert!(status(&wine(&["winmm"]), &all, "CET").1.contains("its own version.dll"));
         assert_eq!(status(&wine(&["winmm", "version"]), &all, "CET").0, Status::Green);
     }
@@ -1695,10 +1761,11 @@ mod tests {
 
     #[test]
     fn addons_that_build_on_it() {
-        let (m, i, d, n) = reds("\u{feff}module A.B // c\nimport X.Y.*\nimport X.{P, Q}\n@if(ModuleExists(\"Z\"))\n\nimport Z.*\n/* import W.* */\nlet s = \"import V.*\";\n\
+        let r = reds("\u{feff}module A.B // c\nimport X.Y.*\nimport X.{P, Q}\n@if(ModuleExists(\"Z\"))\n\nimport Z.*\n/* import W.* */\nlet s = \"import V.*\";\n\
             public class K { func Inner() {} }\nfunc Top() {}\n@wrapMethod(K) func Wrapped() {}\nenum E { A = 0 }\n");
-        assert_eq!((m.as_deref(), i, d), (Some("A.B"), vec!["X.Y".to_string(), "X".into()], vec!["K".to_string(), "Top".into(), "E".into()]));
-        assert!(n.contains("Inner") && !n.contains("V") && !n.contains("W"));
+        assert_eq!((r.module.as_deref(), &r.imports, &r.defs), (Some("A.B"), &vec!["X.Y".to_string(), "X".into()], &vec!["K".to_string(), "Top".into(), "E".into()]));
+        assert!(r.names.contains("Inner") && !r.names.contains("V") && !r.names.contains("W"));
+        assert_eq!((r.lines, r.probes, r.hooks), (vec![2, 3], vec!["Z".to_string()], vec![(Hook::Wrap, "K.Wrapped".to_string(), 11)]));
 
         let list = format!("{LIST}\n[[mod]]\nname = \"Base\"\nnexus_id = 9\ndetect = [\"r6/scripts/Base\"]\nnotes = [{{ build = \"2.5\", text = \"t\", source = \"s\", date = \"d\" }}]\n");
         let code = [("r6/scripts/Base/core.reds", "module Base.Core\npublic class BaseThing {}\npublic func Helper() -> Int32 { return 1; }\n"),
@@ -1767,12 +1834,12 @@ mod tests {
         fs::write(mo2.join("archive/pc/mod/OldTV.archive"), rdar(&[(opus, before)])).unwrap();
         let r = scan(&Manifest::parse(BUILT_IN).unwrap(), &game, std::slice::from_ref(&mo2), &NO_ENV).unwrap();
         let red: Vec<(&str, &str)> = r.rows.iter().filter(|x| x.status == Status::Red).map(|x| (x.name.as_str(), x.why.as_str())).collect();
-        assert_eq!(red.iter().map(|x| x.0).collect::<Vec<_>>(), ["###MuteMenuHum", "##meme_tv", "OldTV"]);
+        assert_eq!(red.iter().map(|x| x.0).collect::<Vec<_>>(), ["###MuteMenuHum", "##meme_tv", "ArchiveXL", "OldTV"], "ArchiveXL: its .xl needs it");
         assert_eq!(red[1].1, "Built for an older patch: replaces the game's sound index; causes missing sounds. Its copy is from 2026-02-03, \
             the game's from 2026-10-15 (maintainer's 2.5 install, 2026-11-08).");
         let tv = &r.rows[1];
         assert_eq!(tv.remove, [("archive/pc/mod/##meme_tv.archive".to_string(), Part::Own), ("archive/pc/mod/##meme_tv.archive.xl".into(), Part::Kin)]);
-        assert!(r.rows[2].remove.is_empty() && r.rows[2].mo2 == [name(&mo2)], "MO2's files are left to MO2");
+        assert!(r.rows[3].remove.is_empty() && r.rows[3].mo2 == [name(&mo2)], "MO2's files are left to MO2");
         assert!(resolve(&game, "archive/pc/mod/*.archive/base/sound/event/eventsmetadata.json").is_none(), "older versions never match such a path");
     }
 
