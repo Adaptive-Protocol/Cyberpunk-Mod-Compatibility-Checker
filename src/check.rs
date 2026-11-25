@@ -1,6 +1,7 @@
 //! The compatibility manifest, the install scan and the verdicts.
 //! Read-only: nothing here writes, moves or deletes a file (that's remove.rs, and only when the user asks).
 use crate::remove::Backup;
+pub use crate::net::Row as NetRow;
 use serde::Deserialize;
 use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet, HashSet}, fs, io::{BufReader, Read, Seek, SeekFrom}, path::{Path, PathBuf}, sync::LazyLock, time::SystemTime};
 

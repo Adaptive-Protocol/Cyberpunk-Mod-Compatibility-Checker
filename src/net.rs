@@ -52,6 +52,7 @@ pub struct Fix { pub detect: String, pub reach: Reach, pub why: String }
 pub enum Reach { Contained, Engine }
 
 impl List {
+    #[cfg(test)]
     pub const EMPTY: Self = Self { schema: 1, updated: String::new(), core: Vec::new(), reach: Vec::new() };
 
     pub fn parse(text: &str) -> Result<Self, String> {
@@ -250,7 +251,7 @@ pub fn missing(mods: &[String], declared: &[&str]) -> String {
 
 /// One mod as the Net sees it: its name, where it is (root, as in check.rs), its **Mod entries** and its facts.
 #[derive(Debug, Default)]
-pub struct Mod { pub name: String, pub root: usize, pub entries: Vec<String>, pub facts: Facts, pub reach: Option<Reach> }
+pub struct Mod { pub name: String, pub root: usize, pub entries: Vec<String>, pub facts: Facts, pub reach: Option<(Reach, String)> }   // reach: the list's correction and why
 
 /// A row in the Net's group: a title, whether it's red, and the lines under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,7 +259,7 @@ pub struct Row { pub title: String, pub lines: Vec<String> }
 
 /// A certain break the Net found, for a red row: the entry to offer, the mod's name, and why.
 #[derive(Debug, Clone)]
-pub struct Break { pub root: usize, pub entry: String, pub name: String, pub why: String }
+pub struct Break { pub entry: String, pub name: String, pub why: String }
 
 #[derive(Debug, Default)]
 pub struct Net { pub cores: Vec<Row>, pub overlaps: Vec<Row>, pub details: Vec<Row>, pub breaks: Vec<Break>, pub engine: usize }
@@ -291,13 +292,13 @@ pub fn mods(roots: &[&Path], entries: &[Vec<String>], scripts: &[Script], owner:
     }
     let mut v: Vec<Mod> = by.into_values().collect();
     for m in &mut v {
-        m.reach = nl.reach.iter().find(|f| m.entries.iter().any(|u| wild(&f.detect, u))).map(|f| f.reach);
+        m.reach = nl.reach.iter().find(|f| m.entries.iter().any(|u| wild(&f.detect, u))).map(|f| (f.reach, f.why.clone()));
     }
     v
 }
 
 impl Mod {
-    pub fn reach(&self) -> Reach { self.reach.unwrap_or_else(|| self.facts.reach()) }
+    pub fn reach(&self) -> Reach { self.reach.as_ref().map_or_else(|| self.facts.reach(), |r| r.0) }
 }
 
 /// Version from a core's fingerprints, and how many installed archives are copies of it.
@@ -318,7 +319,7 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         let users: Vec<usize> = (0..mods.len()).filter(|i| !found.contains(i) && mods[*i].entries.iter().any(|u| c.suite.iter().any(|s| wild(&s.detect, u)))).collect();
         if found.is_empty() {
             for &i in &users {
-                n.breaks.push(Break { root: mods[i].root, entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!(
+                n.breaks.push(Break { entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!(
                     "It's part of {}'s suite and needs {}, which isn't installed. Install it{}, or remove this one too.", c.name, c.name, c.nexus_id.map_or(String::new(), |id| format!(" (nexusmods.com/cyberpunk2077/mods/{id})"))) });
             }
             continue
@@ -330,18 +331,18 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         let all: Vec<&String> = found.iter().flat_map(|&i| &mods[i].entries).collect();
         let copies = c.detect.iter().map(|d| all.iter().filter(|u| wild(d, u)).map(|s| s.to_string()).collect::<Vec<_>>()).find(|v| v.len() > 1);
         if let Some(e) = copies {
-            n.breaks.push(Break { root: mods[found[0]].root, entry: e[1].clone(), name: c.name.clone(), why: format!("{} is installed twice ({}). Keep one copy: remove the older one.", c.name, list(&e)) });
+            n.breaks.push(Break { entry: e[1].clone(), name: c.name.clone(), why: format!("{} is installed twice ({}). Keep one copy: remove the older one.", c.name, list(&e)) });
         }
         let have = version(c, &mods[found[0]]);
         for &i in &users {
             let Some(min) = c.suite.iter().find(|s| mods[i].entries.iter().any(|u| wild(&s.detect, u))).and_then(|s| s.min.as_deref()) else { continue };
             if let Some(h) = have && cmp_ver(h, min).is_lt() {
-                n.breaks.push(Break { root: mods[i].root, entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!("It needs {} {min} or newer, and {h} is installed: update {}.", c.name, c.name) });
+                n.breaks.push(Break { entry: mods[i].entries[0].clone(), name: mods[i].name.clone(), why: format!("It needs {} {min} or newer, and {h} is installed: update {}.", c.name, c.name) });
             }
         }
         for f in c.needs.iter().filter(|f| !has(f) || mac && MAC_LACKS.contains(&f.as_str())) {
             let why = if mac { format!("It needs {f}, which macOS doesn't have, so it can't work on a Mac.") } else { format!("It needs {f}, which isn't installed.") };
-            n.breaks.push(Break { root: mods[found[0]].root, entry: mods[found[0]].entries[0].clone(), name: c.name.clone(), why });
+            n.breaks.push(Break { entry: mods[found[0]].entries[0].clone(), name: c.name.clone(), why });
         }
     }
     // script cores: mods whose modules other mods import
@@ -375,14 +376,14 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         }
     }
     for (a, b, what) in twice {
-        n.breaks.push(Break { root: mods[b].root, entry: mods[b].entries[0].clone(), name: mods[b].name.clone(), why: format!(
+        n.breaks.push(Break { entry: mods[b].entries[0].clone(), name: mods[b].name.clone(), why: format!(
             "It and {} both define {what}, so redscript can't compile them together, which stops every script mod. If one is an older copy of the other, remove it.", mods[a].name) });
     }
     // mods that need a framework that isn't there (or, on a Mac, can't be)
     for m in mods.iter() {
         let lacks: Vec<String> = m.facts.uses.iter().filter(|f| mac && MAC_LACKS.contains(f)).map(|s| s.to_string()).collect();
         if lacks.is_empty() { continue }              // off a Mac, check.rs gives a missing framework one row of its own
-        n.breaks.push(Break { root: m.root, entry: m.entries[0].clone(), name: m.name.clone(), why: format!("It needs {}, which macOS doesn't have, so it can't work on a Mac.", list(&lacks)) });
+        n.breaks.push(Break { entry: m.entries[0].clone(), name: m.name.clone(), why: format!("It needs {}, which macOS doesn't have, so it can't work on a Mac.", list(&lacks)) });
     }
     for (&c, us) in &users {
         suite[c] = suite[c].or(Some(c));
@@ -394,12 +395,13 @@ pub fn net(mods: &mut [Mod], nl: &List, has: &dyn Fn(&str) -> bool, fw: &BTreeSe
         let v = m.facts.modules.iter().filter_map(|d| marker(d).map(|x| x.1)).max_by(|a, b| cmp_ver(a, b));
         let mut lines: Vec<String> = us.iter().map(|&u| format!("Needed by {}", mods[u].name)).collect();
         lines.sort();
+        if let Some((r, why)) = &m.reach { lines.push(format!("The list counts it as {}: {why}", reach(*r))) }
         n.cores.push(Row { title: format!("{}: script core, {}{}, {}", m.name, reach(m.reach()), v.map_or(String::new(), |v| format!(", version {v} (from its version markers)")), count(us.len(), "suite mod")), lines });
     }
     for &(c, core) in &cores {
         let us: Vec<String> = (0..mods.len()).filter(|&i| i != c && suite[i] == Some(c) && !mods[c].entries.iter().all(|e| mods[i].entries.contains(e))).map(|i| format!("Needed by {}", mods[i].name)).collect();
         let r = core.reach.unwrap_or_else(|| mods[c].reach());
-        n.cores.push(Row { title: format!("{}: archive core, {}{}, {}", core.name, reach(r), version(core, &mods[c]).map_or(String::new(), |v| format!(", version {v}")), count(us.len(), "suite mod")), lines: us });
+        n.cores.push(Row { title: format!("{}: archive core, {}{}, {}", core.name, reach(r), version(core, &mods[c]).map_or(String::new(), |v| format!(", version {v}")), count(us.len(), "suite mod")), lines: [us, vec![format!("Listed from {}, {}", core.source, core.date)]].concat() });
     }
     n.cores.sort_by_key(|r| r.title.to_lowercase());
     // overlaps: every engine-reaching mod against the others, and contained mods within their own suite

@@ -39,6 +39,8 @@ const UPDATED_INFO: &str = "A newer version of these mods is installed, so their
     Untick any you want to keep.";
 const VORTEX_NOTE: &str = "Vortex keeps its own copy of each version it installs: to free that space too, remove the old versions in Vortex.";
 const UPDATED_TIP: &str = "A newer version is installed, so restoring this would put the old one back beside it. Delete the backup instead.";
+const NET_TIP: &str = "What your mods stand on and where they touch. Cores are shared bases other mods need. An overlap is two mods changing \
+    the same thing, so only one takes effect: a note, not a fault. Red findings are under Likely to break.";
 const UNLISTED_TIP: &str = "Native plugins hook the game directly and often break after a patch. These aren't in the compatibility list.";
 
 type Job = JoinHandle<Result<Report, String>>;
@@ -46,8 +48,8 @@ type Job = JoinHandle<Result<Report, String>>;
 /// An entry the Remove dialog lists: (path, why it's offered, ticked).
 type Entry = (String, Part, bool);
 
-/// The Remove dialog: each mod (name, why, entries, Mod Organizer 2 mods to untick), and whether the user chose Delete.
-struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>)>, delete: bool }
+/// The Remove dialog: each mod (name, why, entries, Mod Organizer 2 and Vortex mods to untick), and whether the user chose Delete.
+struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>, Vec<String>)>, delete: bool }
 
 struct App {
     game: String, mo2: String, filter: String,
@@ -99,7 +101,7 @@ impl App {
             self.n_backups = match &self.report { Some(Ok(r)) => remove::list(&r.game).len(), _ => 0 };
             if let Some(Ok(r)) = &self.report {                  // after every scan: open Updated mods detected for backups not offered yet
                 let dirs: Vec<PathBuf> = r.updated.iter().map(|u| u.backup.dir.clone()).collect();
-                if dirs.iter().any(|d| !self.asked.contains(d)) { self.obsolete = Some((ticks(r), false)) }
+                if !r.mac && dirs.iter().any(|d| !self.asked.contains(d)) { self.obsolete = Some((ticks(r), false)) }
                 self.asked = dirs;
             }
         }
@@ -170,17 +172,19 @@ impl App {
                 let list = of(s);
                 group(ui, title, color(s), format!("{title}: {}", count(list.len(), "mod")), list.len(), open, |ui| {
                     let can: Vec<&check::Row> = list.iter().copied().filter(|x| !x.remove.is_empty()).collect();
-                    if can.len() > 1 && ui.button(format!("Remove all {}…", can.len())).on_hover_text(REMOVE_TIP).clicked() { ask = Some(can) }
+                    if can.len() > 1 && !r.mac && ui.button(format!("Remove all {}…", can.len())).on_hover_text(REMOVE_TIP).clicked() { ask = Some(can) }
                     for x in &list {
                     ui.horizontal(|ui| {
                         dot(ui, color(s), &x.why);
                         cell(ui, 190.0, |ui| ui.add(egui::Label::new(RichText::new(&x.name).strong()).truncate()));   // a long archive name is cut, in full on hover
                         cell(ui, 60.0, |ui| ui.weak(x.version.as_deref().unwrap_or("")));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if !x.remove.is_empty() {
+                            if !x.remove.is_empty() && !r.mac {
                                 if ui.small_button("Remove…").on_hover_text(REMOVE_TIP).clicked() { ask = Some(vec![x]) }
                             } else if !x.mo2.is_empty() {
                                 ui.weak("in MO2").on_hover_text(format!("Its files are in Mod Organizer 2 ({}). Untick it there.", x.mo2.join(", ")));
+                            } else if !x.vortex.is_empty() {
+                                ui.weak("in Vortex").on_hover_text(format!("Vortex installed it ({}). Disable it there, or Vortex puts it back.", x.vortex.join(", ")));
                             }
                             if let Some(id) = x.nexus_id {
                                 let url = check::nexus_url(id);
@@ -196,6 +200,23 @@ impl App {
                     }
                 });
             }
+            let n = &r.net;
+            let pick = |v: &[check::NetRow]| v.iter().filter(|x| x.title.to_lowercase().contains(&q) || x.lines.iter().any(|l| l.to_lowercase().contains(&q))).cloned().collect::<Vec<_>>();
+            let parts = [("Cores", pick(&n.cores)), ("Overlaps", pick(&n.overlaps)), ("Replaced and wrapped", pick(&n.details))];
+            let shown: usize = parts.iter().map(|p| p.1.len()).sum();
+            let title = format!("Framework Net: {}, {}, {} engine-reaching", count(n.cores.len(), "core"), count(n.overlaps.len(), "overlap"), count(n.engine, "mod"));
+            group(ui, "net", NET, title, shown, true, |ui| {
+                ui.weak(NET_TIP);
+                for (head, rows) in parts.iter().filter(|p| !p.1.is_empty()) {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(*head).strong());
+                    for x in rows {
+                        egui::CollapsingHeader::new(&x.title).id_salt((head, &x.title)).default_open(false).show(ui, |ui| for l in &x.lines {
+                            ui.add(egui::Label::new(RichText::new(l).weak()).wrap());
+                        });
+                    }
+                }
+            });
             group(ui, "unlisted", Color32::GRAY, format!("Unlisted native plugins: {}", unlisted.len()), unlisted.len(), true, |ui| {
                 ui.weak(UNLISTED_TIP);
                 for n in &unlisted { ui.horizontal(|ui| { dot(ui, Color32::GRAY, UNLISTED_TIP); ui.label(n.as_str()) }); }
@@ -208,7 +229,7 @@ impl App {
                 let new = !seen.contains(&p.as_str());
                 seen.push(p);
                 new
-            }).map(|(p, part)| (p.clone(), part.clone(), true)).collect(), x.mo2.clone())).collect();
+            }).map(|(p, part)| (p.clone(), part.clone(), true)).collect(), x.mo2.clone(), x.vortex.clone())).collect();
             self.removal = Some(Removal { mods, delete: false });
         }
         if report && let Some(p) = r.last.as_ref().and_then(|l| l.report.as_ref()) { self.notice = open(p, false) }
@@ -227,7 +248,7 @@ impl App {
             ui.label(REMOVE_INFO);
             if folder_row(ui, "Backups go to", &game) { self.notice = open_folder(&game) }
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries, mo2) in &mut rm.mods {
+            egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries, mo2, vortex) in &mut rm.mods {
                 ui.label(RichText::new(name.as_str()).strong()).on_hover_text(why.as_str());
                 for (p, part, tick) in entries.iter_mut() {
                     ui.horizontal(|ui| {
@@ -241,8 +262,8 @@ impl App {
                         }
                     });
                 }
-                if !mo2.is_empty() {
-                    ui.horizontal(|ui| { ui.add_space(14.0); ui.weak(format!("Also in Mod Organizer 2: {}. Untick {} there.", mo2.join(", "), if mo2.len() == 1 { "it" } else { "them" })) });
+                for (v, how, what) in [(&*mo2, "Mod Organizer 2", "Untick"), (&*vortex, "Vortex", "Disable")].into_iter().filter(|v| !v.0.is_empty()) {
+                    ui.horizontal(|ui| { ui.add_space(14.0); ui.weak(format!("Also in {how}: {}. {what} {} there.", v.join(", "), if v.len() == 1 { "it" } else { "them" })) });
                 }
             });
             ui.separator();
@@ -258,7 +279,7 @@ impl App {
         });
         let Some(delete) = run else { if !close && !modal.should_close() { self.removal = Some(rm) } return };
         let (mut done, mut failed) = (vec![], vec![]);
-        for (name, why, entries, _) in &rm.mods {
+        for (name, why, entries, ..) in &rm.mods {
             let paths: Vec<String> = entries.iter().filter(|e| e.2).map(|e| e.0.clone()).collect();
             if paths.is_empty() { continue }
             let r = if delete { remove::delete(&game, name, why, &paths) } else { remove::backup(&game, name, why, &paths).map(|_| ()) };
@@ -328,14 +349,14 @@ impl App {
                     ui.weak(&b.date);
                     ui.label(RichText::new(&b.name).strong()).on_hover_text(format!("{}\n\n{}\n\nIn {}", b.why, b.paths.join("\n"), b.dir.display()));
                     if updated { ui.weak("newer version installed").on_hover_text(UPDATED_TIP); }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| if asked {
+                    if !r.mac { ui.with_layout(Layout::right_to_left(Align::Center), |ui| if asked {
                         if ui.small_button("Keep").clicked() { self.discard = None }
                         if ui.small_button(RichText::new("Delete for good").color(BAD)).clicked() { act = Some((b.clone(), false)) }
                     } else {
                         if ui.small_button("Delete…").on_hover_text("Deletes this backup for good").clicked() { self.discard = Some(b.dir.clone()) }
                         if ui.add_enabled(!updated, egui::Button::new("Restore").small()).on_hover_text("Moves its files back into the game folder")
                             .on_disabled_hover_text(UPDATED_TIP).clicked() { act = Some((b.clone(), true)) }
-                    });
+                    }); }
                 });
                 if asked {
                     let n = b.paths.len();
@@ -437,6 +458,7 @@ fn launch(cmd: &[String]) -> ! {
 }
 
 const OK: Color32 = Color32::from_rgb(40, 160, 70);
+const NET: Color32 = Color32::from_rgb(90, 140, 200);          // the Net's group: neutral, never a verdict
 const BAD: Color32 = Color32::from_rgb(220, 60, 60);
 
 fn color(s: Status) -> Color32 { match s { Status::Red => Color32::RED, Status::Gray => Color32::GRAY, Status::Green => Color32::GREEN } }
@@ -529,7 +551,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| { ui.colored_label(if *ok { OK } else { BAD }, t); seen = ui.small_button("OK").clicked() });
             }
             if seen { self.notice = None }
-            if let Some(Ok(r)) = &self.report && !r.updated.is_empty() && self.obsolete.is_none() {
+            if let Some(Ok(r)) = &self.report && !r.updated.is_empty() && self.obsolete.is_none() && !r.mac {
                 let (n, mut review) = (r.updated.len(), false);
                 egui::Frame::new().fill(Color32::from_rgba_unmultiplied(40, 160, 70, 40)).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Updated mods detected: {} {} a newer version installed.", count(n, "backed-up mod"), if n == 1 { "has" } else { "have" })).strong());
@@ -575,7 +597,8 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     // --launch <game command>: Steam's launch options put the game's own command after it (%command%)
-    let cmd = args.first().is_some_and(|a| a == "--launch").then(|| args[1..].to_vec()).filter(|c| !c.is_empty());
+    // (never on a Mac, where the app only reports)
+    let cmd = args.first().is_some_and(|a| a == "--launch" && !cfg!(target_os = "macos")).then(|| args[1..].to_vec()).filter(|c| !c.is_empty());
     let start = match &cmd { Some(c) => game_of(c), None => args.first().map(PathBuf::from).filter(|p| p.is_dir()) };
     let go = cmd.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
     let opts = eframe::NativeOptions {
