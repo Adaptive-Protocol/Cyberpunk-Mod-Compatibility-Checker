@@ -181,7 +181,7 @@ jobs:
           if ($s.Status -ne 'Valid') { throw "$f is not validly signed" }
 
       - if: startsWith(github.ref, 'refs/tags/')
-        run: cd dist && sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+        run: cd dist && (sha256sum "${{ matrix.asset }}" || shasum -a 256 "${{ matrix.asset }}") > "${{ matrix.asset }}.sha256"   # macOS may lack sha256sum
       - if: startsWith(github.ref, 'refs/tags/')
         uses: actions/attest-build-provenance@v2
         with:
