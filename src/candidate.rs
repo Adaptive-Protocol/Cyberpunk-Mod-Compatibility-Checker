@@ -51,7 +51,8 @@ pub fn read(p: &Path, pr: &Progress) -> Result<Candidate, String> {
     let mut k = Keep { c: &mut c, kept: 0 };
     let r = if p.is_dir() { k.folder(p, pr) } else if low.ends_with(".7z") { k.sevenz(p, pr) } else if low.ends_with(".zip") { k.zip(p, pr) }
         else if low.ends_with(".rar") { Err(RAR.into()) } else { Err("Choose a mod's .7z or .zip, or the folder of an extracted one.".into()) };
-    r.map_err(|e| if pr.stop.load(Relaxed) { CANCELLED.into() } else if e.to_lowercase().contains("password") { "It's password-protected, so it can't be read.".into() } else { e })?;
+    if pr.stop.load(Relaxed) { return Err(CANCELLED.into()) }      // a reader may swallow the stop, so ask here
+    r.map_err(|e| if e.to_lowercase().contains("password") { "It's password-protected, so it can't be read.".into() } else { e })?;
     c.fomod = c.files.iter().find(|(f, _)| f.to_lowercase().ends_with("fomod/moduleconfig.xml")).and_then(|(f, g)| match g { Got::Text(b) => Fomod::parse(f, b), _ => None });
     Ok(c)
 }
@@ -107,7 +108,7 @@ impl Keep<'_> {
         use sevenz_rust2::{ArchiveReader, EntryDecision, Password};
         let mut z = ArchiveReader::new(fs::File::open(p).map_err(|e| e.to_string())?, Password::empty()).map_err(|e| e.to_string())?;
         let files = &z.archive().files;
-        limits(files.len(), files.iter().map(|e| e.size()).sum(), pr)?;
+        limits(files.len(), files.iter().map(sevenz_rust2::ArchiveEntry::size).sum(), pr)?;
         let mut failed = None;
         z.for_each_entries_with_decision(|e, r| {
             if e.is_directory() { return Ok(EntryDecision::Continue) }
@@ -136,6 +137,7 @@ impl Keep<'_> {
     fn folder(&mut self, p: &Path, pr: &Progress) -> Result<(), String> {
         let mut all = vec![];
         walk(p, 0, &mut |f| if all.len() <= MAX_FILES { all.push(f) });     // never follows links
+        all.sort();                                                         // the same order on every OS
         let pick: Vec<(String, std::path::PathBuf, u64)> = all.iter().filter_map(|f| {
             let rel = f.strip_prefix(p).ok()?.to_string_lossy().replace('\\', "/");
             want(&rel.to_ascii_lowercase()).map(|_| (rel, f.clone(), f.metadata().map_or(0, |m| m.len())))
@@ -201,7 +203,7 @@ fn dom(xml: &str) -> Option<Node> {
     let mut r = quick_xml::Reader::from_str(xml);
     let mut stack = vec![Node::default()];
     let node = |s: &quick_xml::events::BytesStart| Node { tag: s.local_name().as_ref().to_ascii_lowercase(),
-        attrs: s.attributes().flatten().map(|a| (a.key.local_name().as_ref().to_ascii_lowercase(), a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(|v| v.into_owned()).unwrap_or_default())).collect(), ..Default::default() };
+        attrs: s.attributes().flatten().map(|a| (a.key.local_name().as_ref().to_ascii_lowercase(), a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map(std::borrow::Cow::into_owned).unwrap_or_default())).collect(), ..Default::default() };
     for _ in 0..1_000_000 {
         match r.read_event().ok()? {
             Event::Start(s) => { if stack.len() > 64 { return None } stack.push(node(&s)) }
@@ -210,7 +212,7 @@ fn dom(xml: &str) -> Option<Node> {
             Event::Text(t) => stack.last_mut()?.text += &t.xml10_content(),
             Event::CData(t) => stack.last_mut()?.text += &t,
             Event::GeneralRef(g) => stack.last_mut()?.text += &g.resolve_char_ref().ok().flatten().map(String::from)
-                .or_else(|| quick_xml::escape::unescape(&format!("&{};", g.xml10_content())).ok().map(|s| s.into_owned())).unwrap_or_default(),
+                .or_else(|| quick_xml::escape::unescape(&format!("&{};", g.xml10_content())).ok().map(std::borrow::Cow::into_owned)).unwrap_or_default(),
             Event::Eof => return (stack.len() == 1).then(|| stack.pop()).flatten(),
             _ => {}
         }
@@ -232,7 +234,7 @@ impl Fomod {
     pub fn parse(path: &str, b: &[u8]) -> Option<Self> {
         let root = dom(&utf(b))?;
         let cfg = root.kid("config")?;
-        let base = slash(&path[..path.to_lowercase().rfind("fomod/")?]);
+        let base = slash(&path[..path.to_ascii_lowercase().rfind("fomod/")?]);
         let copies = |n: Option<&Node>| -> Vec<Copy> { n.map(|n| n.kids.iter().filter(|k| k.tag == "file" || k.tag == "folder").map(|k| {
             let src = slash(&k.at("source"));
             Copy { dst: if k.attrs.iter().any(|a| a.0 == "destination") { slash(&k.at("destination")) } else { src.clone() }, src, folder: k.tag == "folder" }
@@ -296,7 +298,7 @@ impl Fomod {
     /// The files the ticked options install, with the flags they set and the conditional installs that match.
     fn copies(&self, has: &dyn Fn(&str) -> bool) -> Vec<Copy> {
         let (mut v, mut flags) = (self.required.clone(), BTreeMap::new());
-        for s in self.steps.iter() {
+        for s in &self.steps {
             if s.visible.as_ref().is_some_and(|c| !holds(c, &flags, has)) { continue }
             for o in s.groups.iter().flat_map(|g| &g.options).filter(|o| o.on) { v.extend(o.files.iter().cloned()); flags.extend(o.flags.iter().cloned()) }
         }
@@ -330,11 +332,11 @@ pub fn place<'a>(c: &'a Candidate, has: &dyn Fn(&str) -> bool) -> (Vec<(String, 
     let (mut out, mut lost, mut roots): (Vec<(String, &Got)>, Vec<String>, BTreeSet<String>) = (vec![], vec![], BTreeSet::new());
     let mut put = |dst: String, g| if !out.iter().any(|(d, _): &(String, &Got)| d.eq_ignore_ascii_case(&dst)) { out.push((dst, g)) };
     if let Some(f) = &c.fomod {
-        let base = f.base.to_lowercase();
+        let base = f.base.to_ascii_lowercase();                     // ASCII only: the same byte offsets as the path
+        let lows: Vec<String> = c.files.iter().map(|f| f.0.to_ascii_lowercase()).collect();
         for cp in f.copies(has) {
-            let src = [base.as_str(), &cp.src.to_lowercase()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("/");
-            for (path, g) in &c.files {
-                let low = path.to_lowercase();
+            let src = [base.as_str(), &cp.src.to_ascii_lowercase()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("/");
+            for ((path, g), low) in c.files.iter().zip(&lows) {
                 let rest = if src.is_empty() { Some(0) } else { low.strip_prefix(&src).filter(|r| r.is_empty() || r.starts_with('/')).map(|r| path.len() - r.len()) };
                 match rest {
                     Some(i) if cp.folder => put([cp.dst.as_str(), path[i..].trim_start_matches('/')].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("/"), g),
@@ -351,7 +353,7 @@ pub fn place<'a>(c: &'a Candidate, has: &dyn Fn(&str) -> bool) -> (Vec<(String, 
             roots.insert(segs[..i].join("/"));
             put(segs[i..].join("/"), g);
         } else if wild("*.archive", path) || wild("*.xl", path) { put(format!("archive/pc/mod/{}", segs[segs.len() - 1]), g) }
-        else { lost.push(path.clone()) }
+        else if !matches!(g, Got::Nested) { lost.push(path.clone()) }
     }
     (out, lost, if roots.len() > 1 { roots.into_iter().map(|r| if r.is_empty() { "the top folder".into() } else { r }).collect() } else { vec![] })
 }
@@ -381,20 +383,21 @@ impl Pre {
 pub fn precheck(inst: &Installed, nl: &net::List, c: &Candidate) -> Pre {
     let has_file = |f: &str| crate::check::resolve(&inst.game, f).is_some();
     let (placed, lost, alts) = place(c, &has_file);
-    let mut m = Mod { name: c.name.clone(), root: usize::MAX, version: c.version.clone(), ..Default::default() };
+    let mut m = Mod { name: c.name.clone(), root: usize::MAX, ..Default::default() };
     for (dst, g) in &placed {
         if let Some(u) = unit(dst) && !m.entries.iter().any(|e| e.eq_ignore_ascii_case(&u)) { m.entries.push(u) }
         match g {
             Got::Text(b) => m.facts.add(dst, b),
-            Got::Index(hs, fp) => { m.facts.prints.push((dst.clone(), *fp)); for h in hs { m.facts.files.entry(*h).or_insert_with(|| dst.clone()); } }
+            Got::Index(hs, fp) => m.facts.archive(dst, hs, *fp),
             Got::Native => m.facts.add(dst, &[]),
             Got::Nested => {}
         }
     }
-    m.reach = nl.reach.iter().find(|f| m.entries.iter().any(|u| wild(&f.detect, u))).map(|f| (f.reach, f.why.clone()));
+    m.reach = nl.reach_of(&m.entries);
     // installed mods with the same entries are older copies it replaces: it's checked in their place
     let low: HashSet<String> = m.entries.iter().map(|e| e.to_lowercase()).collect();
-    let (old, keep): (Vec<&Mod>, Vec<&Mod>) = inst.mods.iter().partition(|x| x.entries.iter().any(|e| low.contains(&e.to_lowercase())));
+    let all = inst.read.get_or_init(|| { let mut v = inst.mods.clone(); for m in &mut v { m.facts.read_archives() } v });
+    let (old, keep): (Vec<&Mod>, Vec<&Mod>) = all.iter().partition(|x| x.entries.iter().any(|e| low.contains(&e.to_lowercase())));
     let (mut mods, ci) = (vec![m], 0);      // the Candidate goes first, so its own file leads every line about a pair
     mods.extend(keep.into_iter().cloned());
     let n = net::net(&mut mods, nl, &|f| inst.has.contains(f), &inst.fw, inst.mac, Some(ci));
@@ -417,7 +420,8 @@ pub fn precheck(inst: &Installed, nl: &net::List, c: &Candidate) -> Pre {
             None => format!("It builds on {u} ({at}), which no installed mod provides: install the mod that does first."),
         });
     }
-    for f in cm.facts.uses.iter().filter(|f| !inst.mac && !inst.has.contains(**f)) {
+    let uses = if inst.mac { None } else { Some(&cm.facts.uses) };      // on a Mac the Net says what can't work there
+    for f in uses.into_iter().flatten().filter(|f| !inst.has.contains(**f)) {
         let file = placed.iter().find(|(d, _)| net::needs(d) == Some(*f)).map_or(String::new(), |x| format!(" ({})", x.0));
         p.breaks.push(format!("It needs {f}{file}, which isn't installed: install {f} first."));
     }
@@ -431,20 +435,22 @@ pub fn precheck(inst: &Installed, nl: &net::List, c: &Candidate) -> Pre {
     let ours = inst.game_files.get_or_init(|| net::game_files(&inst.game));
     let mut by: BTreeMap<&str, usize> = BTreeMap::new();
     for (h, a) in &cm.facts.files { if ours.contains(h) { *by.entry(a.as_str()).or_default() += 1 } }
-    p.notes.extend(by.iter().map(|(a, k)| format!("{} replaces {k} of the game's own file{}.", a.rsplit('/').next().unwrap_or(a), if *k == 1 { "" } else { "s" })));
+    p.notes.extend(by.iter().map(|(a, k)| format!("{} replaces {k} of the game's own files.", a.rsplit('/').next().unwrap_or(a))));
     for (f, paths) in &inst.frameworks {
-        let own: Vec<String> = placed.iter().map(|x| x.0.clone()).filter(|d| paths.iter().any(|p| p.eq_ignore_ascii_case(d))).collect();
-        let into: Vec<String> = placed.iter().map(|x| x.0.clone()).filter(|d| !own.contains(d) && unit(d).is_some_and(|u| paths.iter().filter_map(|p| unit(p)).any(|q| q.eq_ignore_ascii_case(&u)))).collect();
+        let units: Vec<String> = paths.iter().filter_map(|p| unit(p)).collect();
+        let is_own = |d: &&String| paths.iter().any(|p| p.eq_ignore_ascii_case(d));
+        let own: Vec<String> = placed.iter().map(|x| &x.0).filter(is_own).cloned().collect();
+        let into: Vec<String> = placed.iter().map(|x| &x.0).filter(|d| !is_own(d) && unit(d).is_some_and(|u| units.iter().any(|q| q.eq_ignore_ascii_case(&u)))).cloned().collect();
         if !own.is_empty() { p.notes.push(format!("It ships its own copy of {f} ({}), which replaces the one in your game folder.", list(&own))) }
         if !into.is_empty() { p.notes.push(format!("It adds {} to {f}'s folder; {} to this mod, not {f}.", list(&into), if into.len() == 1 { "that file belongs" } else { "those files belong" })) }
     }
-    let of = |want: fn(&Got) -> bool| -> Vec<String> { placed.iter().filter(|(_, g)| want(g)).map(|x| x.0.clone()).collect() };
-    let native = of(|g| matches!(g, Got::Native));
+    let native: Vec<String> = placed.iter().filter(|(_, g)| matches!(g, Got::Native)).map(|x| x.0.clone()).collect();
     if !native.is_empty() { p.notes.push(format!("It runs native code ({}), which can only be judged once the game loads it.", list(&native))) }
-    let nested = of(|g| matches!(g, Got::Nested));
+    let nested: Vec<String> = c.files.iter().filter(|(_, g)| matches!(g, Got::Nested)).map(|x| x.0.clone()).collect();
     if !nested.is_empty() { p.notes.push(format!("It holds other archives ({}), which weren't opened: check each on its own.", list(&nested))) }
     if !c.skipped.is_empty() { p.notes.push(format!("{} couldn't be read (too large, or not what its name says), so {} checked.", list(&c.skipped), if c.skipped.len() == 1 { "it wasn't" } else { "they weren't" })) }
-    if !lost.is_empty() { p.notes.push(format!("{} aren't in the game's folders, so where they'd install couldn't be told: {}.", count(lost.len(), "file"), list(&lost.iter().take(3).cloned().collect::<Vec<_>>()))) }
+    let one = lost.len() == 1;
+    if !lost.is_empty() { p.notes.push(format!("{} {} in the game's folders, so where {} install couldn't be told: {}.", count(lost.len(), "file"), if one { "isn't" } else { "aren't" }, if one { "it'd" } else { "they'd" }, list(&lost.iter().take(3).cloned().collect::<Vec<_>>()))) }
     if !alts.is_empty() { p.notes.push(format!("It holds {} alternatives without an installer ({}): they were checked together, so install only one.", alts.len(), list(&alts))) }
     if placed.is_empty() { p.notes.push("Nothing in it installs into the game's folders, so there was nothing to check.".into()) }
     p
@@ -453,7 +459,7 @@ pub fn precheck(inst: &Installed, nl: &net::List, c: &Candidate) -> Pre {
 /// Plain text for `--precheck` and the tests.
 pub fn text(c: &Candidate, p: &Pre) -> String {
     let mut s = format!("{}{}\n{}\n{}\n", c.name, c.version.as_deref().map_or(String::new(), |v| format!(" {v}")), p.summary(), p.reach);
-    for (head, lines) in [("will break", &p.breaks), ("note", &p.notes)] { for l in lines.iter() { s += &format!("\t{head}: {l}\n") } }
+    for (head, lines) in [("will break", &p.breaks), ("note", &p.notes)] { for l in lines { s += &format!("\t{head}: {l}\n") } }
     for r in &p.net { s += &format!("\tnet: {}\n", r.title); for l in &r.lines { s += &format!("\t\t{l}\n") } }
     if let Some(f) = &c.fomod {
         for st in &f.steps { for g in &st.groups { for o in &g.options {
@@ -556,5 +562,24 @@ mod tests {
         let p = precheck(&inst, &net::List::parse("schema = 1\nupdated = \"x\"").unwrap(), &c);
         assert_eq!((p.breaks.len(), p.notes[0].as_str()), (0, "It replaces your installed Sorter, so it was checked in place of it."));
         assert_eq!(p.summary(), "No certain breaks found · 1 note");
+    }
+
+    #[test]
+    fn odd_paths_cancel_and_nested_archives() {
+        // a path whose lowercase form has another byte length (the Kelvin sign) keeps its offsets
+        assert_eq!(Fomod::parse("a\u{212A}/fomod/ModuleConfig.xml", b"<config/>").map(|f| f.base), Some("a\u{212A}".into()));
+        let dir = std::env::temp_dir().join(format!("ccc-cancel-{}", std::process::id()));
+        fs::create_dir_all(dir.join("archive/pc/mod")).unwrap();
+        fs::write(dir.join("archive/pc/mod/x.archive"), b"not an archive").unwrap();
+        fs::write(dir.join("Optional.zip"), b"").unwrap();
+        // Cancel wins even when the reader got to the end
+        let pr = Progress::default();
+        pr.stop.store(true, Relaxed);
+        assert_eq!(read(&dir, &pr).unwrap_err(), CANCELLED);
+        // an archive inside it is named as one, not as a file that couldn't be placed
+        let c = read(&dir, &Progress::default()).unwrap();
+        let p = precheck(&Installed { game: dir.join("no-game"), ..Default::default() }, &net::List::EMPTY, &c);
+        assert!(p.notes.iter().any(|n| n.starts_with("It holds other archives (Optional.zip)")) && !p.notes.iter().any(|n| n.contains("in the game's folders")), "{:?}", p.notes);
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

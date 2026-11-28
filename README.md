@@ -154,7 +154,7 @@ CyberpunkModCompatibilityChecker --precheck <mod .7z, .zip or folder> [<game fol
 CyberpunkModCompatibilityChecker --launch <game command>
 ```
 
-`--report` prints the same verdicts as text, without opening a window. It lists what **Remove…** would take, but never changes a file. `--precheck` prints the [Pre-install check](#pre-install-check)'s result for one mod. `--launch` checks first and then runs the game command, as described in [Checking before every launch](#checking-before-every-launch).
+`--report` prints the same verdicts as text, without opening a window. It lists what **Remove…** would take (nothing on a Mac), but never changes a file. `--precheck` prints the [Pre-install check](#pre-install-check)'s result for one mod. `--launch` checks first and then runs the game command, as described in [Checking before every launch](#checking-before-every-launch).
 
 ## Removing it
 

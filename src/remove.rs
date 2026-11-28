@@ -29,9 +29,7 @@ pub fn date(days: i64) -> String {
 }
 
 /// Today, as "2026-11-25".
-pub fn date_now() -> String { today() }
-
-fn today() -> String { date(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| (d.as_secs() / 86_400) as i64)) }
+pub fn today() -> String { date(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| (d.as_secs() / 86_400) as i64)) }
 
 /// A mod name fit for a folder name on every OS.
 fn safe(name: &str) -> String {

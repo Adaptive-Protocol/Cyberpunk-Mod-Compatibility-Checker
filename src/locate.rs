@@ -1,4 +1,5 @@
-//! Finds the game folder (Steam, GOG, Epic; Windows and Linux) and Mod Organizer 2's enabled mods. Read-only.
+//! Finds the game folder (Steam, GOG, Epic, the Mac App Store; Windows, Linux and macOS), Mod Organizer 2's enabled
+//! mods with their versions (meta.ini), and what Vortex deployed. Read-only.
 use std::{env, fs, iter, path::{Path, PathBuf}};
 
 /// The game folder: it holds the game's exe, or on a Mac its app (or is inside it, for the App Store copy) and r6.
@@ -41,7 +42,7 @@ pub fn find_game() -> Option<PathBuf> {
         iter::once(s.clone()).chain(libs).map(|l| l.join("steamapps/common/Cyberpunk 2077"))
     }).collect();
     if cfg!(target_os = "macos") {     // the RED Modding wiki's "Modding on macOS": Steam, GOG and the App Store
-        c.extend([h.join("Library/Application Support/Steam/steamapps/common/Cyberpunk 2077"), "/Applications/Cyberpunk 2077".into(), "/Applications/Cyberpunk2077.app/Contents/Data".into()]);
+        c.extend(["/Applications/Cyberpunk 2077".into(), "/Applications/Cyberpunk2077.app/Contents/Data".into()]);
     } else if cfg!(windows) {
         let epic = fs::read_dir("C:/ProgramData/Epic/EpicGamesLauncher/Data/Manifests").into_iter().flatten().flatten()
             .filter_map(|e| fs::read_to_string(e.path()).ok()).filter(|t| t.contains("\"Cyberpunk 2077\""))
@@ -177,7 +178,7 @@ fn unpack(b: &[u8], i: &mut usize, depth: u8) -> Option<Pack> {
 }
 
 impl Pack {
-    fn get(&self, k: &str) -> Option<&Pack> { if let Pack::Map(m) = self { m.iter().find(|(x, _)| *x == Pack::Str(k.into())).map(|x| &x.1) } else { None } }
+    fn get(&self, k: &str) -> Option<&Pack> { if let Pack::Map(m) = self { m.iter().find(|(x, _)| x.str() == Some(k)).map(|x| &x.1) } else { None } }
     fn str(&self) -> Option<&str> { if let Pack::Str(s) = self { Some(s) } else { None } }
 }
 
@@ -195,7 +196,7 @@ fn vortex_name(src: &str) -> String {
 pub fn vortex(game: &Path) -> std::collections::BTreeMap<String, String> {
     let mut v = std::collections::BTreeMap::new();
     for f in ["vortex.deployment.msgpack", "archive/pc/mod/vortex.deployment.msgpack"] {
-        let Some(b) = fs::read(game.join(f)).ok().filter(|b| b.len() < 64 << 20) else { continue };
+        let Some(b) = crate::check::read(&game.join(f), 64 << 20) else { continue };
         let root = unpack(&b, &mut 0, 0);
         let Some(Pack::List(files)) = root.as_ref().and_then(|p| p.get("files")) else { continue };
         for e in files {

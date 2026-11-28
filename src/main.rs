@@ -17,7 +17,7 @@ const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO
     It changes files only when you ask: Back up and remove moves a broken mod into _mod_backups in your game folder, \
     and Delete removes it for good. Both show every file first, and neither touches the game's own files or the frameworks. \
     Each scan also checks your backups: when a newer version of a backed-up mod is installed, it offers to delete the obsolete backup.\n\n\
-    The compatibility list is curated by the maintainer and built into each release. A newer compat.toml placed next to the app is used instead. \
+    The compatibility list is curated by the maintainer and built into each release. A newer compat.toml or net.toml placed next to the app is used instead. \
     Besides your mods (for archives, only their file index), the app reads the logs from your last launch (RED4ext's, redscript's, your mods' own, and Advanced Crash Reporter's if you use it) \
     and, on Windows, the version of the Visual C++ runtime.\n\n\
     Crash and freeze reports come from Advanced Crash Reporter by Akiway (nexusmods.com/cyberpunk2077/mods/34403), when it's installed. \
@@ -75,9 +75,9 @@ struct PreWin {
 
 impl PreWin {
     /// Reads a Candidate on a background thread: a big archive takes a while, and Cancel has to stay live.
-    fn start(&mut self, p: PathBuf) {
-        let (pr, path) = (Arc::new(candidate::Progress::default()), p.clone());
-        *self = Self { file: p.display().to_string(), pr: pr.clone(), read: Some(thread::spawn(move || candidate::read(&path, &pr))), ..Default::default() };
+    fn start(p: PathBuf) -> Self {
+        let pr = Arc::new(candidate::Progress::default());
+        Self { file: p.display().to_string(), pr: pr.clone(), read: Some(thread::spawn(move || candidate::read(&p, &pr))), ..Default::default() }
     }
 
     /// Checks it against the install, again whenever the FOMOD choices change.
@@ -87,7 +87,8 @@ impl PreWin {
         self.check = Some(thread::spawn(move || candidate::precheck(&inst, &nl, &c)));
     }
 
-    fn poll(&mut self, inst: &Arc<net::Installed>, nl: &net::List) {
+    /// Takes in a finished read or check. True when a check just finished.
+    fn poll(&mut self, inst: &Arc<net::Installed>, nl: &net::List) -> bool {
         if self.read.as_ref().is_some_and(JoinHandle::is_finished) {
             match self.read.take().unwrap().join() {
                 Ok(Ok(mut c)) => {
@@ -99,10 +100,12 @@ impl PreWin {
                 Err(_) => self.error = Some("The check stopped unexpectedly.".into()),
             }
         }
-        if self.check.as_ref().is_some_and(JoinHandle::is_finished) {
+        let done = self.check.as_ref().is_some_and(JoinHandle::is_finished);
+        if done {
             self.out = self.check.take().unwrap().join().ok();
             if self.out.is_none() { self.error = Some("The check stopped unexpectedly.".into()) }
         }
+        done
     }
 
     fn busy(&self) -> bool { self.read.is_some() || self.check.is_some() }
@@ -111,12 +114,15 @@ impl PreWin {
 /// An entry the Remove dialog lists: (path, why it's offered, ticked).
 type Entry = (String, Part, bool);
 
-/// The Remove dialog: each mod (name, why, entries, Mod Organizer 2 and Vortex mods to untick), and whether the user chose Delete.
-struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>, Vec<String>)>, delete: bool }
+/// A mod in the Remove dialog: name, why, entries, and the Mod Organizer 2 and Vortex mods to untick.
+type Removed = (String, String, Vec<Entry>, Vec<String>, Vec<String>);
+
+/// The Remove dialog: each mod, and whether the user chose Delete.
+struct Removal { mods: Vec<Removed>, delete: bool }
 
 struct App {
     game: String, mo2: String, filter: String,
-    list: Manifest, net: net::List, source: String, net_source: &'static str, warning: Option<String>,
+    list: Manifest, net: net::List, source: &'static str, net_source: &'static str, warning: Option<String>,
     report: Option<Result<Report, String>>,
     job: Option<Job>,
     theme: Option<ThemePreference>,      // last theme sent to the native title bar
@@ -140,14 +146,15 @@ impl App {
         if let Some(s) = start { game = s.display().to_string() }   // a folder dropped onto the exe
         else if !locate::is_game(Path::new(&game)) && let Some(g) = locate::find_game() { game = g.display().to_string() }
         if mo2.is_empty() && let Some(m) = locate::find_mo2(Path::new(&game)) { mo2 = m.display().to_string() }
-        let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        let (net, net_source, w2) = net::List::load(exe_dir().as_deref());
+        let dir = exe_dir();
+        let (list, source, warning) = Manifest::load(dir.as_deref());
+        let (net, net_source, w2) = net::List::load(dir.as_deref());
         let warning = [warning, w2].into_iter().flatten().reduce(|a, b| format!("{a}\n{b}"));
         let checks = cc.storage.and_then(|s| eframe::get_value(s, "checks")).unwrap_or_default();
         let mut app = Self { game, mo2, filter: String::new(), list, net, source, net_source, warning, report: None, job: None, theme: None,
                              removal: None, backups: None, discard: None, obsolete: None, asked: vec![], n_backups: 0, notice: None, pre: None, checks,
                              auto: launch.is_some(), launch };
-        if let Some(p) = cand { app.pre = Some(PreWin::default()); app.pre.as_mut().unwrap().start(p) }   // a mod archive dropped onto the app
+        app.pre = cand.map(PreWin::start);      // a mod archive dropped onto the app
         app.rescan();
         app
     }
@@ -241,14 +248,14 @@ impl App {
                 let list = of(s);
                 group(ui, title, color(s), format!("{title}: {}", count(list.len(), "mod")), list.len(), open, |ui| {
                     let can: Vec<&check::Row> = list.iter().copied().filter(|x| !x.remove.is_empty()).collect();
-                    if can.len() > 1 && !r.mac && ui.button(format!("Remove all {}…", can.len())).on_hover_text(REMOVE_TIP).clicked() { ask = Some(can) }
+                    if can.len() > 1 && ui.button(format!("Remove all {}…", can.len())).on_hover_text(REMOVE_TIP).clicked() { ask = Some(can) }
                     for x in &list {
                     ui.horizontal(|ui| {
                         dot(ui, color(s), &x.why);
                         cell(ui, 190.0, |ui| ui.add(egui::Label::new(RichText::new(&x.name).strong()).truncate()));   // a long archive name is cut, in full on hover
                         cell(ui, 60.0, |ui| ui.weak(x.version.as_deref().unwrap_or("")));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if !x.remove.is_empty() && !r.mac {
+                            if !x.remove.is_empty() {
                                 if ui.small_button("Remove…").on_hover_text(REMOVE_TIP).clicked() { ask = Some(vec![x]) }
                             } else if !x.mo2.is_empty() {
                                 ui.weak("in MO2").on_hover_text(format!("Its files are in Mod Organizer 2 ({}). Untick it there.", x.mo2.join(", ")));
@@ -274,8 +281,8 @@ impl App {
                 });
             }
             let n = &r.net;
-            let pick = |v: &[check::NetRow]| v.iter().filter(|x| x.title.to_lowercase().contains(&q) || x.lines.iter().any(|l| l.to_lowercase().contains(&q))).cloned().collect::<Vec<_>>();
-            let parts = [("Cores", pick(&n.cores)), ("Overlaps", pick(&n.overlaps)), ("Replaced and wrapped", pick(&n.details))];
+            let hit = |x: &&net::Row| x.title.to_lowercase().contains(&q) || x.lines.iter().any(|l| l.to_lowercase().contains(&q));
+            let parts = [("Cores", &n.cores), ("Overlaps", &n.overlaps), ("Replaced and wrapped", &n.details)].map(|(head, v)| (head, v.iter().filter(&hit).collect::<Vec<_>>()));
             let shown: usize = parts.iter().map(|p| p.1.len()).sum();
             let title = format!("Framework Net: {}, {}, {} engine-reaching", count(n.cores.len(), "core"), count(n.overlaps.len(), "overlap"), count(n.engine, "mod"));
             group(ui, "net", NET, title, shown, true, |ui| {
@@ -464,10 +471,10 @@ impl App {
             self.pre = open.then_some(w);
             return
         };
-        let (inst, nl) = (r.installed.clone(), self.net.clone());
-        w.poll(&inst, &nl);
+        let (inst, nl) = (r.installed.clone(), &self.net);
+        let done = w.poll(&inst, nl);
         if w.busy() { ctx.request_repaint_after(Duration::from_millis(50)) }
-        if !w.busy() && let Some(f) = ctx.input(|i| i.raw.dropped_files.iter().find_map(|d| d.path.clone())) { w.start(f) }
+        if !w.busy() && let Some(f) = ctx.input(|i| i.raw.dropped_files.iter().find_map(|d| d.path.clone())) { w = PreWin::start(f) }
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let (mut open, mut toggle) = (true, None);              // toggle: (step, group, option, ticked)
         let wide = (ctx.screen_rect().width() - 180.0).clamp(300.0, 980.0);
@@ -482,7 +489,7 @@ impl App {
                 for (label, file) in [("Choose file…", true), ("Choose folder…", false)] {
                     if ui.add_enabled(!w.busy(), egui::Button::new(label)).clicked() {
                         let d = rfd::FileDialog::new().add_filter("Mod archive", &["7z", "zip"]);
-                        if let Some(p) = if file { d.pick_file() } else { d.pick_folder() } { w.start(p) }
+                        if let Some(p) = if file { d.pick_file() } else { d.pick_folder() } { w = PreWin::start(p) }
                     }
                 }
             }));
@@ -503,7 +510,7 @@ impl App {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.heading(RichText::new(c.name.clone() + &c.version.as_deref().map_or(String::new(), |v| format!(" {v}"))).strong());
-                if let Some(id) = c.nexus_id && ui.small_button("Open on Nexus").on_hover_text("Opens the mod\'s page in your web browser").clicked() {
+                if let Some(id) = c.nexus_id && ui.small_button("Open on Nexus").on_hover_text("Opens the mod's page in your web browser").clicked() {
                     ui.ctx().open_url(egui::OpenUrl::new_tab(check::nexus_url(id)));
                 }
             });
@@ -514,7 +521,7 @@ impl App {
                     if lines.is_empty() { continue }
                     ui.add_space(4.0);
                     ui.label(RichText::new(head).strong());
-                    for l in lines.iter() { ui.horizontal(|ui| { dot(ui, color, ""); ui.add(egui::Label::new(RichText::new(l).color(color)).wrap()) }); }
+                    for l in lines { ui.horizontal(|ui| { dot(ui, color, ""); ui.add(egui::Label::new(RichText::new(l).color(color)).wrap()) }); }
                 }
                 for x in &p.net {
                     ui.add_space(2.0);
@@ -546,10 +553,10 @@ impl App {
                 }
             });
         });
-        if let Some((s, g, o, on)) = toggle && let Some(c) = &mut w.cand && let Some(f) = &mut c.fomod && f.set(s, g, o, on) { w.recheck(&inst, &nl) }
-        if let (Some(c), Some(p)) = (&w.cand, &w.out) {         // remembered, so a later problem with this mod shows what the check said
+        if let Some((s, g, o, on)) = toggle && let Some(c) = &mut w.cand && let Some(f) = &mut c.fomod && f.set(s, g, o, on) { w.recheck(&inst, nl) }
+        if done && let (Some(c), Some(p)) = (&w.cand, &w.out) { // remembered, so a later problem with this mod shows what the check said
             let key = c.name.to_lowercase();
-            let it = Checked { when: remove::date_now(), summary: p.summary(), breaks: p.breaks.clone() };
+            let it = Checked { when: remove::today(), summary: p.summary(), breaks: p.breaks.clone() };
             if self.checks.get(&key).is_none_or(|x| x.summary != it.summary || x.breaks != it.breaks) { self.checks.insert(key, it); }
         }
         self.pre = open.then_some(w);
@@ -609,7 +616,7 @@ fn open_folder(game: &Path) -> Option<(bool, String)> { open(&remove::home(game)
 /// Shows a plain folder in the file manager, or opens a plain file (never a link) in its default app, such as a crash report in a text editor.
 fn open(p: &Path, dir: bool) -> Option<(bool, String)> {
     if !fs::symlink_metadata(p).is_ok_and(|m| if dir { m.is_dir() } else { m.is_file() }) { return None }
-    let with = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    let with = if cfg!(windows) { "explorer" } else if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     Command::new(with).arg(p).spawn().err().map(|e| (false, format!("Couldn't open {} with {with}: {e}", p.display())))
 }
 /// Every backup in Updated mods detected, ticked.
@@ -766,29 +773,25 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.first().is_some_and(|a| a == "--precheck") {        // headless pre-install check: --precheck <mod .7z, .zip or folder> [game folder]
-        let (list, _, _) = Manifest::load(exe_dir().as_deref());
-        let (net, _, _) = net::List::load(exe_dir().as_deref());
-        let game = args.get(2).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
-        let out = args.get(1).ok_or_else(|| "Usage: --precheck <mod .7z, .zip or folder> [game folder]".to_string()).and_then(|f| {
-            let mut c = candidate::read(Path::new(f), &candidate::Progress::default())?;
-            let r = check::check(&list, &net, &game, &[])?;
-            if let Some(d) = &mut c.fomod { d.defaults(&|p| check::resolve(&game, p).is_some()) }
-            Ok(candidate::text(&c, &candidate::precheck(&r.installed, &net, &c)))
-        });
-        match out { Ok(t) => print!("{t}"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
-        return Ok(());
-    }
-    if args.first().is_some_and(|a| a == "--report") {          // headless check: --report <game folder> [MO2 instance folder]
-        let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        let (net, net_source, w2) = net::List::load(exe_dir().as_deref());
+    if let Some(mode @ ("--report" | "--precheck")) = args.first().map(String::as_str) {    // headless: nothing opens, nothing changes
+        let dir = exe_dir();
+        let (list, source, warning) = Manifest::load(dir.as_deref());
+        let (net, net_source, w2) = net::List::load(dir.as_deref());
         for w in [warning, w2].into_iter().flatten() { eprintln!("{w}") }
-        let game = args.get(1).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
-        let mods = args.get(2).map_or(Ok(vec![]), |m| locate::mo2_mods(Path::new(m)));
-        match mods.and_then(|m| check::check(&list, &net, &game, &m)) {
-            Ok(r) => print!("{}", check::text(&r, &format!("{source}; Net list {}, {net_source}", net.updated), &list.updated)),
-            Err(e) => { eprintln!("{e}"); std::process::exit(1) }
-        }
+        let game = |i: usize| args.get(i).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
+        let out = if mode == "--report" {       // --report <game folder> [MO2 instance folder]
+            args.get(2).map_or(Ok(vec![]), |m| locate::mo2_mods(Path::new(m))).and_then(|m| check::check(&list, &net, &game(1), &m))
+                .map(|r| check::text(&r, &format!("{source}; Net list {}, {net_source}", net.updated), &list.updated))
+        } else {                                // --precheck <mod .7z, .zip or folder> [game folder]
+            args.get(1).ok_or_else(|| "Usage: --precheck <mod .7z, .zip or folder> [game folder]".to_string()).and_then(|f| {
+                let game = game(2);
+                let mut c = candidate::read(Path::new(f), &candidate::Progress::default())?;
+                let r = check::check(&list, &net, &game, &[])?;
+                if let Some(d) = &mut c.fomod { d.defaults(&|p| check::resolve(&game, p).is_some()) }
+                Ok(candidate::text(&c, &candidate::precheck(&r.installed, &net, &c)))
+            })
+        };
+        match out { Ok(t) => print!("{t}"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
         return Ok(());
     }
     // --launch <game command>: Steam's launch options put the game's own command after it (%command%)
@@ -796,7 +799,7 @@ fn main() -> eframe::Result {
     let cmd = args.first().is_some_and(|a| a == "--launch" && !cfg!(target_os = "macos")).then(|| args[1..].to_vec()).filter(|c| !c.is_empty());
     // a folder dropped onto the app is the game folder; a mod's archive (or any other folder) opens the Pre-install check
     let dropped = cmd.is_none().then(|| args.first().map(PathBuf::from)).flatten().filter(|p| p.exists());
-    let game_folder = dropped.clone().filter(|p| p.is_dir() && locate::is_game(p));
+    let game_folder = dropped.clone().filter(|p| locate::is_game(p));
     let start = match &cmd { Some(c) => game_of(c), None => game_folder.clone() };
     let cand = dropped.filter(|_| game_folder.is_none());
     let go = cmd.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
