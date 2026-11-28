@@ -3,11 +3,13 @@
 //! Offline: it never connects to anything. It changes files only when the user asks (remove.rs).
 mod check;
 mod locate;
+mod candidate;
+mod net;
 mod remove;
 
 use check::{Manifest, Part, Report, Status, count};
 use eframe::egui::{self, Align, Color32, Layout, RichText, ThemePreference};
-use std::{env, fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
+use std::{collections::BTreeMap, env, fs, path::{Path, PathBuf}, process::Command, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::Duration};
 
 const TITLE: &str = "Cyberpunk Mod Compatibility Checker";
 const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO_PKG_VERSION"), " by FauxNoodles on Nexus Mods, MIT license. \
@@ -20,13 +22,19 @@ const ABOUT: &str = concat!("Cyberpunk Mod Compatibility Checker v", env!("CARGO
     and, on Windows, the version of the Visual C++ runtime.\n\n\
     Crash and freeze reports come from Advanced Crash Reporter by Akiway (nexusmods.com/cyberpunk2077/mods/34403), when it's installed. \
     The app only reads them; none of its code is used.\n\n\
-    Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch \
-    and the rows with coloured status circles. Framework background from the RED Modding wiki (wiki.redmodding.org). The .archive file index layout as documented in WolvenKit (github.com/WolvenKit/WolvenKit); no code was copied. \
+    Design inspired by red4-conflicts by rfuzzo (github.com/rfuzzo/Cyberpunk-utility): the dark theme and theme switch, \
+    the rows with coloured status circles, and that the archive loaded first wins a shared game file, shown as a win and not a fault. \
+    Framework background and what the Mac game can load from the RED Modding wiki (wiki.redmodding.org); the Mac game's own paths as documented in \
+    cp2077-mac-archive-patcher by brunoformagio (github.com/brunoformagio/cp2077-mac-archive-patcher). \
+    The .archive file index layout as documented in WolvenKit (github.com/WolvenKit/WolvenKit); no code was copied. \
+    Reading a suite core's version from marker modules (DigitalVixenCore.Api4_9_12) follows DigitalVixen's convention for their core. \
     Backing a mod up instead of deleting it follows the reversible disable in mod managers such as Vortex and Mod Organizer 2, \
     and the confirmation that lists every file comes from the maintainer's Nexus Mod Duplication Cleanup. \
     The verdicts, list format and layout are this app's own.\n\n\
-    Built with egui/eframe, rfd, serde and toml. Their licenses are in THIRD-PARTY-NOTICES.txt.\n\n\
-    Started with --launch (from Steam's launch options), it starts the game after the check.\n\n\
+    The Pre-install check reads a mod in memory: .7z with sevenz-rust2, .zip with zip, and FOMOD installers with quick-xml, all pure Rust. \
+    The FOMOD installer format is the modding community's, as Mod Organizer 2 and Vortex implement it. It never installs, extracts, writes or runs anything.\n\n\
+    Built with egui/eframe, rfd, serde, toml, sevenz-rust2, zip and quick-xml. Their licenses are in THIRD-PARTY-NOTICES.txt.\n\n\
+    Started with --launch (from Steam's launch options), it starts the game after the check. On macOS it only reports: no file actions and no launch mode.\n\n\
     The code was written by an AI assistant (Claude, made by Anthropic) at the maintainer's direction.");
 const LAST_TIP: &str = "From the logs of the last time the game ran. They update the next time you launch it.";
 const REMOVE_TIP: &str = "Move it out of the game folder until it's updated, or delete it. You see every file first.";
@@ -38,19 +46,77 @@ const UPDATED_INFO: &str = "A newer version of these mods is installed, so their
     Untick any you want to keep.";
 const VORTEX_NOTE: &str = "Vortex keeps its own copy of each version it installs: to free that space too, remove the old versions in Vortex.";
 const UPDATED_TIP: &str = "A newer version is installed, so restoring this would put the old one back beside it. Delete the backup instead.";
+const NET_TIP: &str = "What your mods stand on and where they touch. Cores are shared bases other mods need. An overlap is two mods changing \
+    the same thing, so only one takes effect: a note, not a fault. Red findings are under Likely to break.";
 const UNLISTED_TIP: &str = "Native plugins hook the game directly and often break after a patch. These aren't in the compatibility list.";
+const PRE_TIP: &str = "Check a mod you haven't installed yet";
+const PRE_INFO: &str = "Drop a mod's .7z or .zip here, or the folder of an extracted one, and it's checked against your install before you install it. \
+    Nothing is installed, extracted or run: the archive is read in memory, and the mod's files stay where they are. \
+    A check can't see what two mods do once the game is running, so it never calls a mod safe.";
+const PRE_DROP: &str = "Drop a mod's .7z, .zip or folder here";
 
 type Job = JoinHandle<Result<Report, String>>;
+
+/// A **Pre-install check**'s last result for one mod, kept in the app's settings and shown again if that mod turns red.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Checked { when: String, summary: String, breaks: Vec<String> }
+
+/// The Pre-install check window: the **Candidate** being read or checked, the read's progress, and the last result.
+#[derive(Default)]
+struct PreWin {
+    file: String,                                        // what was dropped or chosen
+    pr: Arc<candidate::Progress>,
+    read: Option<JoinHandle<Result<candidate::Candidate, String>>>,
+    check: Option<JoinHandle<candidate::Pre>>,
+    cand: Option<candidate::Candidate>,
+    out: Option<candidate::Pre>,
+    error: Option<String>,
+}
+
+impl PreWin {
+    /// Reads a Candidate on a background thread: a big archive takes a while, and Cancel has to stay live.
+    fn start(&mut self, p: PathBuf) {
+        let (pr, path) = (Arc::new(candidate::Progress::default()), p.clone());
+        *self = Self { file: p.display().to_string(), pr: pr.clone(), read: Some(thread::spawn(move || candidate::read(&path, &pr))), ..Default::default() };
+    }
+
+    /// Checks it against the install, again whenever the FOMOD choices change.
+    fn recheck(&mut self, inst: &Arc<net::Installed>, nl: &net::List) {
+        let Some(c) = self.cand.clone() else { return };
+        let (inst, nl) = (inst.clone(), nl.clone());
+        self.check = Some(thread::spawn(move || candidate::precheck(&inst, &nl, &c)));
+    }
+
+    fn poll(&mut self, inst: &Arc<net::Installed>, nl: &net::List) {
+        if self.read.as_ref().is_some_and(JoinHandle::is_finished) {
+            match self.read.take().unwrap().join() {
+                Ok(Ok(mut c)) => {
+                    if let Some(f) = &mut c.fomod { f.defaults(&|p| check::resolve(&inst.game, p).is_some()) }
+                    self.cand = Some(c);
+                    self.recheck(inst, nl);
+                }
+                Ok(Err(e)) => self.error = Some(e),
+                Err(_) => self.error = Some("The check stopped unexpectedly.".into()),
+            }
+        }
+        if self.check.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.out = self.check.take().unwrap().join().ok();
+            if self.out.is_none() { self.error = Some("The check stopped unexpectedly.".into()) }
+        }
+    }
+
+    fn busy(&self) -> bool { self.read.is_some() || self.check.is_some() }
+}
 
 /// An entry the Remove dialog lists: (path, why it's offered, ticked).
 type Entry = (String, Part, bool);
 
-/// The Remove dialog: each mod (name, why, entries, Mod Organizer 2 mods to untick), and whether the user chose Delete.
-struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>)>, delete: bool }
+/// The Remove dialog: each mod (name, why, entries, Mod Organizer 2 and Vortex mods to untick), and whether the user chose Delete.
+struct Removal { mods: Vec<(String, String, Vec<Entry>, Vec<String>, Vec<String>)>, delete: bool }
 
 struct App {
     game: String, mo2: String, filter: String,
-    list: Manifest, source: String, warning: Option<String>,
+    list: Manifest, net: net::List, source: String, net_source: &'static str, warning: Option<String>,
     report: Option<Result<Report, String>>,
     job: Option<Job>,
     theme: Option<ThemePreference>,      // last theme sent to the native title bar
@@ -61,20 +127,27 @@ struct App {
     asked: Vec<PathBuf>,                 // the backups it last opened for, so a rescan reopens it only for new ones
     n_backups: usize,
     notice: Option<(bool, String)>,      // (succeeded, what happened) after a file action
+    pre: Option<PreWin>,                 // the Pre-install check window, while open
+    checks: BTreeMap<String, Checked>,   // each Candidate's last pre-install check, by mod name
     launch: Option<Arc<AtomicBool>>,     // --launch: set to start the game once the window closes
     auto: bool,                          // --launch: the first scan hasn't been judged yet
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext, start: Option<PathBuf>, launch: Option<Arc<AtomicBool>>) -> Self {
+    fn new(cc: &eframe::CreationContext, start: Option<PathBuf>, cand: Option<PathBuf>, launch: Option<Arc<AtomicBool>>) -> Self {
         cc.egui_ctx.set_theme(cc.storage.and_then(|s| eframe::get_value(s, "theme")).unwrap_or(ThemePreference::Dark));
         let (mut game, mut mo2): (String, String) = cc.storage.and_then(|s| eframe::get_value(s, eframe::APP_KEY)).unwrap_or_default();
         if let Some(s) = start { game = s.display().to_string() }   // a folder dropped onto the exe
         else if !locate::is_game(Path::new(&game)) && let Some(g) = locate::find_game() { game = g.display().to_string() }
         if mo2.is_empty() && let Some(m) = locate::find_mo2(Path::new(&game)) { mo2 = m.display().to_string() }
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        let mut app = Self { game, mo2, filter: String::new(), list, source, warning, report: None, job: None, theme: None,
-                             removal: None, backups: None, discard: None, obsolete: None, asked: vec![], n_backups: 0, notice: None, auto: launch.is_some(), launch };
+        let (net, net_source, w2) = net::List::load(exe_dir().as_deref());
+        let warning = [warning, w2].into_iter().flatten().reduce(|a, b| format!("{a}\n{b}"));
+        let checks = cc.storage.and_then(|s| eframe::get_value(s, "checks")).unwrap_or_default();
+        let mut app = Self { game, mo2, filter: String::new(), list, net, source, net_source, warning, report: None, job: None, theme: None,
+                             removal: None, backups: None, discard: None, obsolete: None, asked: vec![], n_backups: 0, notice: None, pre: None, checks,
+                             auto: launch.is_some(), launch };
+        if let Some(p) = cand { app.pre = Some(PreWin::default()); app.pre.as_mut().unwrap().start(p) }   // a mod archive dropped onto the app
         app.rescan();
         app
     }
@@ -82,11 +155,11 @@ impl App {
     /// Scans on a background thread, so a slow drive never freezes the window.
     fn rescan(&mut self) {
         let clean = |s: &str| PathBuf::from(s.trim().trim_matches('"'));   // tolerates a pasted "quoted path"
-        let (game, mo2, list) = (clean(&self.game), clean(&self.mo2), self.list.clone());
+        let (game, mo2, list, net) = (clean(&self.game), clean(&self.mo2), self.list.clone(), self.net.clone());
         if game.as_os_str().is_empty() { return self.report = None }
         self.job = Some(thread::spawn(move || {
             let mods = if mo2.as_os_str().is_empty() { vec![] } else { locate::mo2_mods(&mo2)? };
-            check::check(&list, &game, &mods)
+            check::check(&list, &net, &game, &mods)
         }));
     }
 
@@ -96,7 +169,7 @@ impl App {
             self.n_backups = match &self.report { Some(Ok(r)) => remove::list(&r.game).len(), _ => 0 };
             if let Some(Ok(r)) = &self.report {                  // after every scan: open Updated mods detected for backups not offered yet
                 let dirs: Vec<PathBuf> = r.updated.iter().map(|u| u.backup.dir.clone()).collect();
-                if dirs.iter().any(|d| !self.asked.contains(d)) { self.obsolete = Some((ticks(r), false)) }
+                if !r.mac && dirs.iter().any(|d| !self.asked.contains(d)) { self.obsolete = Some((ticks(r), false)) }
                 self.asked = dirs;
             }
         }
@@ -121,6 +194,7 @@ impl App {
         let rows: Vec<_> = r.rows.iter().filter(|x| x.name.to_lowercase().contains(&q)).collect();
         let of = |s| rows.iter().copied().filter(move |x| x.status == s).collect::<Vec<_>>();
         let unlisted: Vec<_> = r.unlisted.iter().filter(|n| n.to_lowercase().contains(&q)).collect();
+        let checks = &self.checks;
         let mut ask: Option<Vec<&check::Row>> = None;          // rows whose Remove… was pressed
         let mut report = false;                                  // Open report was pressed
         egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -167,17 +241,19 @@ impl App {
                 let list = of(s);
                 group(ui, title, color(s), format!("{title}: {}", count(list.len(), "mod")), list.len(), open, |ui| {
                     let can: Vec<&check::Row> = list.iter().copied().filter(|x| !x.remove.is_empty()).collect();
-                    if can.len() > 1 && ui.button(format!("Remove all {}…", can.len())).on_hover_text(REMOVE_TIP).clicked() { ask = Some(can) }
+                    if can.len() > 1 && !r.mac && ui.button(format!("Remove all {}…", can.len())).on_hover_text(REMOVE_TIP).clicked() { ask = Some(can) }
                     for x in &list {
                     ui.horizontal(|ui| {
                         dot(ui, color(s), &x.why);
                         cell(ui, 190.0, |ui| ui.add(egui::Label::new(RichText::new(&x.name).strong()).truncate()));   // a long archive name is cut, in full on hover
                         cell(ui, 60.0, |ui| ui.weak(x.version.as_deref().unwrap_or("")));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if !x.remove.is_empty() {
+                            if !x.remove.is_empty() && !r.mac {
                                 if ui.small_button("Remove…").on_hover_text(REMOVE_TIP).clicked() { ask = Some(vec![x]) }
                             } else if !x.mo2.is_empty() {
                                 ui.weak("in MO2").on_hover_text(format!("Its files are in Mod Organizer 2 ({}). Untick it there.", x.mo2.join(", ")));
+                            } else if !x.vortex.is_empty() {
+                                ui.weak("in Vortex").on_hover_text(format!("Vortex installed it ({}). Disable it there, or Vortex puts it back.", x.vortex.join(", ")));
                             }
                             if let Some(id) = x.nexus_id {
                                 let url = check::nexus_url(id);
@@ -190,9 +266,30 @@ impl App {
                         });
                     });
                     for n in &x.notes { ui.horizontal(|ui| { ui.add_space(24.0); ui.label(format!("• {} ({}, {})", n.text, n.source, n.date)) }); }
+                    if s == Status::Red && let Some(c) = checks.get(&x.name.to_lowercase()) {
+                        ui.horizontal(|ui| { ui.add_space(24.0); ui.weak(format!("• Your pre-install check on {}: {}", c.when, c.summary))
+                            .on_hover_text(if c.breaks.is_empty() { "It found no certain breaks then.".to_string() } else { c.breaks.join("\n") }) });
+                    }
                     }
                 });
             }
+            let n = &r.net;
+            let pick = |v: &[check::NetRow]| v.iter().filter(|x| x.title.to_lowercase().contains(&q) || x.lines.iter().any(|l| l.to_lowercase().contains(&q))).cloned().collect::<Vec<_>>();
+            let parts = [("Cores", pick(&n.cores)), ("Overlaps", pick(&n.overlaps)), ("Replaced and wrapped", pick(&n.details))];
+            let shown: usize = parts.iter().map(|p| p.1.len()).sum();
+            let title = format!("Framework Net: {}, {}, {} engine-reaching", count(n.cores.len(), "core"), count(n.overlaps.len(), "overlap"), count(n.engine, "mod"));
+            group(ui, "net", NET, title, shown, true, |ui| {
+                ui.weak(NET_TIP);
+                for (head, rows) in parts.iter().filter(|p| !p.1.is_empty()) {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(*head).strong());
+                    for x in rows {
+                        egui::CollapsingHeader::new(&x.title).id_salt((head, &x.title)).default_open(false).show(ui, |ui| for l in &x.lines {
+                            ui.add(egui::Label::new(RichText::new(l).weak()).wrap());
+                        });
+                    }
+                }
+            });
             group(ui, "unlisted", Color32::GRAY, format!("Unlisted native plugins: {}", unlisted.len()), unlisted.len(), true, |ui| {
                 ui.weak(UNLISTED_TIP);
                 for n in &unlisted { ui.horizontal(|ui| { dot(ui, Color32::GRAY, UNLISTED_TIP); ui.label(n.as_str()) }); }
@@ -205,7 +302,7 @@ impl App {
                 let new = !seen.contains(&p.as_str());
                 seen.push(p);
                 new
-            }).map(|(p, part)| (p.clone(), part.clone(), true)).collect(), x.mo2.clone())).collect();
+            }).map(|(p, part)| (p.clone(), part.clone(), true)).collect(), x.mo2.clone(), x.vortex.clone())).collect();
             self.removal = Some(Removal { mods, delete: false });
         }
         if report && let Some(p) = r.last.as_ref().and_then(|l| l.report.as_ref()) { self.notice = open(p, false) }
@@ -224,7 +321,7 @@ impl App {
             ui.label(REMOVE_INFO);
             if folder_row(ui, "Backups go to", &game) { self.notice = open_folder(&game) }
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries, mo2) in &mut rm.mods {
+            egui::ScrollArea::vertical().max_height((screen.y - 240.0).clamp(100.0, 340.0)).show(ui, |ui| for (name, why, entries, mo2, vortex) in &mut rm.mods {
                 ui.label(RichText::new(name.as_str()).strong()).on_hover_text(why.as_str());
                 for (p, part, tick) in entries.iter_mut() {
                     ui.horizontal(|ui| {
@@ -238,8 +335,8 @@ impl App {
                         }
                     });
                 }
-                if !mo2.is_empty() {
-                    ui.horizontal(|ui| { ui.add_space(14.0); ui.weak(format!("Also in Mod Organizer 2: {}. Untick {} there.", mo2.join(", "), if mo2.len() == 1 { "it" } else { "them" })) });
+                for (v, how, what) in [(&*mo2, "Mod Organizer 2", "Untick"), (&*vortex, "Vortex", "Disable")].into_iter().filter(|v| !v.0.is_empty()) {
+                    ui.horizontal(|ui| { ui.add_space(14.0); ui.weak(format!("Also in {how}: {}. {what} {} there.", v.join(", "), if v.len() == 1 { "it" } else { "them" })) });
                 }
             });
             ui.separator();
@@ -255,7 +352,7 @@ impl App {
         });
         let Some(delete) = run else { if !close && !modal.should_close() { self.removal = Some(rm) } return };
         let (mut done, mut failed) = (vec![], vec![]);
-        for (name, why, entries, _) in &rm.mods {
+        for (name, why, entries, ..) in &rm.mods {
             let paths: Vec<String> = entries.iter().filter(|e| e.2).map(|e| e.0.clone()).collect();
             if paths.is_empty() { continue }
             let r = if delete { remove::delete(&game, name, why, &paths) } else { remove::backup(&game, name, why, &paths).map(|_| ()) };
@@ -325,14 +422,14 @@ impl App {
                     ui.weak(&b.date);
                     ui.label(RichText::new(&b.name).strong()).on_hover_text(format!("{}\n\n{}\n\nIn {}", b.why, b.paths.join("\n"), b.dir.display()));
                     if updated { ui.weak("newer version installed").on_hover_text(UPDATED_TIP); }
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| if asked {
+                    if !r.mac { ui.with_layout(Layout::right_to_left(Align::Center), |ui| if asked {
                         if ui.small_button("Keep").clicked() { self.discard = None }
                         if ui.small_button(RichText::new("Delete for good").color(BAD)).clicked() { act = Some((b.clone(), false)) }
                     } else {
                         if ui.small_button("Delete…").on_hover_text("Deletes this backup for good").clicked() { self.discard = Some(b.dir.clone()) }
                         if ui.add_enabled(!updated, egui::Button::new("Restore").small()).on_hover_text("Moves its files back into the game folder")
                             .on_disabled_hover_text(UPDATED_TIP).clicked() { act = Some((b.clone(), true)) }
-                    });
+                    }); }
                 });
                 if asked {
                     let n = b.paths.len();
@@ -354,6 +451,108 @@ impl App {
             self.rescan();                                      // the Updated mods list follows the backups
         }
         if !open { self.backups = None; self.discard = None }
+    }
+
+    /// The Pre-install check: reads a Candidate and checks it against the install. It never installs or changes anything.
+    fn pre_window(&mut self, ctx: &egui::Context) {
+        let Some(mut w) = self.pre.take() else { return };
+        let Some(Ok(r)) = &self.report else {                   // without a scan there's nothing to compare the mod with
+            let mut open = true;
+            egui::Window::new("Pre-install check").open(&mut open).default_width(520.0).collapsible(false).show(ctx, |ui| {
+                ui.label("Choose your Cyberpunk 2077 folder first: a mod is checked against the mods you have installed.");
+            });
+            self.pre = open.then_some(w);
+            return
+        };
+        let (inst, nl) = (r.installed.clone(), self.net.clone());
+        w.poll(&inst, &nl);
+        if w.busy() { ctx.request_repaint_after(Duration::from_millis(50)) }
+        if !w.busy() && let Some(f) = ctx.input(|i| i.raw.dropped_files.iter().find_map(|d| d.path.clone())) { w.start(f) }
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let (mut open, mut toggle) = (true, None);              // toggle: (step, group, option, ticked)
+        let wide = (ctx.screen_rect().width() - 180.0).clamp(300.0, 980.0);
+        egui::Window::new("Pre-install check").open(&mut open).default_width(wide).collapsible(false).show(ctx, |ui| {
+            ui.set_min_width(wide);
+            ui.weak(PRE_INFO);
+            ui.add_space(4.0);
+            let frame = egui::Frame::new().fill(if hovering { NET.gamma_multiply(0.25) } else { ui.visuals().faint_bg_color }).inner_margin(10.0).corner_radius(4.0);
+            frame.show(ui, |ui| ui.horizontal(|ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(PRE_DROP).strong());
+                for (label, file) in [("Choose file…", true), ("Choose folder…", false)] {
+                    if ui.add_enabled(!w.busy(), egui::Button::new(label)).clicked() {
+                        let d = rfd::FileDialog::new().add_filter("Mod archive", &["7z", "zip"]);
+                        if let Some(p) = if file { d.pick_file() } else { d.pick_folder() } { w.start(p) }
+                    }
+                }
+            }));
+            if w.file.is_empty() { return }
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(&w.file).monospace()).truncate()).on_hover_text(&w.file);
+            if w.busy() {
+                let (done, total) = (w.pr.done.load(Ordering::Relaxed), w.pr.total.load(Ordering::Relaxed));
+                ui.horizontal(|ui| {
+                    let bar = egui::ProgressBar::new(if total > 0 { done as f32 / total as f32 } else { 0.0 }).desired_width(260.0)
+                        .text(if w.read.is_some() { format!("Reading… {} MB", done >> 20) } else { "Checking…".into() });
+                    ui.add(bar);
+                    if ui.button("Cancel").clicked() { w.pr.stop.store(true, Ordering::Relaxed) }
+                });
+            }
+            if let Some(e) = &w.error { ui.colored_label(BAD, e); }
+            let (Some(c), Some(p)) = (&w.cand, &w.out) else { return };
+            ui.separator();
+            ui.horizontal(|ui| {
+                ui.heading(RichText::new(c.name.clone() + &c.version.as_deref().map_or(String::new(), |v| format!(" {v}"))).strong());
+                if let Some(id) = c.nexus_id && ui.small_button("Open on Nexus").on_hover_text("Opens the mod\'s page in your web browser").clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(check::nexus_url(id)));
+                }
+            });
+            ui.label(RichText::new(p.summary()).strong().color(if p.breaks.is_empty() { ui.visuals().text_color() } else { BAD }));
+            ui.weak(&p.reach);
+            egui::ScrollArea::vertical().max_height((ctx.screen_rect().height() * 0.62).max(160.0)).auto_shrink([false, true]).show(ui, |ui| {
+                for (head, lines, color) in [("Will break", &p.breaks, BAD), ("Notes", &p.notes, ui.visuals().weak_text_color())] {
+                    if lines.is_empty() { continue }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(head).strong());
+                    for l in lines.iter() { ui.horizontal(|ui| { dot(ui, color, ""); ui.add(egui::Label::new(RichText::new(l).color(color)).wrap()) }); }
+                }
+                for x in &p.net {
+                    ui.add_space(2.0);
+                    egui::CollapsingHeader::new(&x.title).id_salt(("pre", &x.title)).show(ui, |ui| for l in &x.lines { ui.weak(l); });
+                }
+                if let Some(f) = &c.fomod {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Installer options").strong());
+                    ui.weak("Ticked as the installer would have them. Only the ticked files are checked.");
+                    for (si, st) in f.steps.iter().enumerate() {
+                        if !st.name.is_empty() { ui.label(RichText::new(&st.name).italics()); }
+                        for (gi, g) in st.groups.iter().enumerate() {
+                            ui.horizontal(|ui| { ui.add_space(10.0); ui.weak(format!("{} ({})", g.name, candidate::rule(g.kind))) });
+                            for (oi, o) in g.options.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(22.0);
+                                    let mut on = o.on;
+                                    let r = ui.add_enabled(candidate::changeable(g.kind, o), egui::Checkbox::new(&mut on, &o.name));
+                                    if !o.about.is_empty() { r.on_hover_text(&o.about); }
+                                    if on != o.on { toggle = Some((si, gi, oi, on)) }
+                                });
+                            }
+                        }
+                    }
+                }
+                if !p.entries.is_empty() {
+                    ui.add_space(6.0);
+                    ui.weak(format!("It would install: {}", p.entries.join(", ")));
+                }
+            });
+        });
+        if let Some((s, g, o, on)) = toggle && let Some(c) = &mut w.cand && let Some(f) = &mut c.fomod && f.set(s, g, o, on) { w.recheck(&inst, &nl) }
+        if let (Some(c), Some(p)) = (&w.cand, &w.out) {         // remembered, so a later problem with this mod shows what the check said
+            let key = c.name.to_lowercase();
+            let it = Checked { when: remove::date_now(), summary: p.summary(), breaks: p.breaks.clone() };
+            if self.checks.get(&key).is_none_or(|x| x.summary != it.summary || x.breaks != it.breaks) { self.checks.insert(key, it); }
+        }
+        self.pre = open.then_some(w);
     }
 
     /// --launch: says why the game hasn't started yet, and lets the user start it anyway or not at all.
@@ -434,6 +633,7 @@ fn launch(cmd: &[String]) -> ! {
 }
 
 const OK: Color32 = Color32::from_rgb(40, 160, 70);
+const NET: Color32 = Color32::from_rgb(90, 140, 200);          // the Net's group: neutral, never a verdict
 const BAD: Color32 = Color32::from_rgb(220, 60, 60);
 
 fn color(s: Status) -> Color32 { match s { Status::Red => Color32::RED, Status::Gray => Color32::GRAY, Status::Green => Color32::GREEN } }
@@ -486,6 +686,9 @@ impl eframe::App for App {
                 && ui.button(format!("Backups ({})", self.n_backups)).on_hover_text("Mods you backed up and removed").clicked() {
                 self.backups = Some(remove::list(&r.game));
             }
+            if self.report.as_ref().is_some_and(Result::is_ok) && ui.button("Pre-install check…").on_hover_text(PRE_TIP).clicked() && self.pre.is_none() {
+                self.pre = Some(PreWin::default());
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.horizontal(egui::widgets::global_theme_preference_buttons);
                 ui.separator();
@@ -516,6 +719,8 @@ impl eframe::App for App {
                     ui.weak("·");
                 }
                 ui.weak(format!("Compatibility list {} ({})", self.list.updated, self.source));
+                ui.weak("·");
+                ui.weak(format!("Net list {} ({})", self.net.updated, self.net_source));
                 if let Some(Ok(Report { last: Some(l), .. })) = &self.report { ui.weak("·"); ui.weak(format!("Last launch {}", l.when)); }
                 if self.job.is_some() { ui.spinner(); }
             });
@@ -526,7 +731,7 @@ impl eframe::App for App {
                 ui.horizontal(|ui| { ui.colored_label(if *ok { OK } else { BAD }, t); seen = ui.small_button("OK").clicked() });
             }
             if seen { self.notice = None }
-            if let Some(Ok(r)) = &self.report && !r.updated.is_empty() && self.obsolete.is_none() {
+            if let Some(Ok(r)) = &self.report && !r.updated.is_empty() && self.obsolete.is_none() && !r.mac {
                 let (n, mut review) = (r.updated.len(), false);
                 egui::Frame::new().fill(Color32::from_rgba_unmultiplied(40, 160, 70, 40)).inner_margin(8.0).corner_radius(4.0).show(ui, |ui| ui.horizontal(|ui| {
                     ui.label(RichText::new(format!("Updated mods detected: {} {} a newer version installed.", count(n, "backed-up mod"), if n == 1 { "has" } else { "have" })).strong());
@@ -549,37 +754,58 @@ impl eframe::App for App {
         self.removal_dialog(ctx);
         self.updates_dialog(ctx);
         self.backups_window(ctx);
+        self.pre_window(ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &(&self.game, &self.mo2));
         if let Some(t) = self.theme { eframe::set_value(storage, "theme", &t) }
+        eframe::set_value(storage, "checks", &self.checks);
     }
 }
 
 fn main() -> eframe::Result {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--precheck") {        // headless pre-install check: --precheck <mod .7z, .zip or folder> [game folder]
+        let (list, _, _) = Manifest::load(exe_dir().as_deref());
+        let (net, _, _) = net::List::load(exe_dir().as_deref());
+        let game = args.get(2).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
+        let out = args.get(1).ok_or_else(|| "Usage: --precheck <mod .7z, .zip or folder> [game folder]".to_string()).and_then(|f| {
+            let mut c = candidate::read(Path::new(f), &candidate::Progress::default())?;
+            let r = check::check(&list, &net, &game, &[])?;
+            if let Some(d) = &mut c.fomod { d.defaults(&|p| check::resolve(&game, p).is_some()) }
+            Ok(candidate::text(&c, &candidate::precheck(&r.installed, &net, &c)))
+        });
+        match out { Ok(t) => print!("{t}"), Err(e) => { eprintln!("{e}"); std::process::exit(1) } }
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "--report") {          // headless check: --report <game folder> [MO2 instance folder]
         let (list, source, warning) = Manifest::load(exe_dir().as_deref());
-        if let Some(w) = warning { eprintln!("{w}") }
+        let (net, net_source, w2) = net::List::load(exe_dir().as_deref());
+        for w in [warning, w2].into_iter().flatten() { eprintln!("{w}") }
         let game = args.get(1).map(PathBuf::from).or_else(locate::find_game).unwrap_or_default();
         let mods = args.get(2).map_or(Ok(vec![]), |m| locate::mo2_mods(Path::new(m)));
-        match mods.and_then(|m| check::check(&list, &game, &m)) {
-            Ok(r) => print!("{}", check::text(&r, &source, &list.updated)),
+        match mods.and_then(|m| check::check(&list, &net, &game, &m)) {
+            Ok(r) => print!("{}", check::text(&r, &format!("{source}; Net list {}, {net_source}", net.updated), &list.updated)),
             Err(e) => { eprintln!("{e}"); std::process::exit(1) }
         }
         return Ok(());
     }
     // --launch <game command>: Steam's launch options put the game's own command after it (%command%)
-    let cmd = args.first().is_some_and(|a| a == "--launch").then(|| args[1..].to_vec()).filter(|c| !c.is_empty());
-    let start = match &cmd { Some(c) => game_of(c), None => args.first().map(PathBuf::from).filter(|p| p.is_dir()) };
+    // (never on a Mac, where the app only reports)
+    let cmd = args.first().is_some_and(|a| a == "--launch" && !cfg!(target_os = "macos")).then(|| args[1..].to_vec()).filter(|c| !c.is_empty());
+    // a folder dropped onto the app is the game folder; a mod's archive (or any other folder) opens the Pre-install check
+    let dropped = cmd.is_none().then(|| args.first().map(PathBuf::from)).flatten().filter(|p| p.exists());
+    let game_folder = dropped.clone().filter(|p| p.is_dir() && locate::is_game(p));
+    let start = match &cmd { Some(c) => game_of(c), None => game_folder.clone() };
+    let cand = dropped.filter(|_| game_folder.is_none());
     let go = cmd.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
     let opts = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_title(TITLE).with_inner_size([1100.0, 700.0]).with_min_inner_size([640.0, 400.0]),
         ..Default::default()
     };
     let flag = go.clone();
-    eframe::run_native(TITLE, opts, Box::new(|cc| Ok(Box::new(App::new(cc, start, flag)))))?;
+    eframe::run_native(TITLE, opts, Box::new(|cc| Ok(Box::new(App::new(cc, start, cand, flag)))))?;
     if let (Some(c), Some(go)) = (cmd, go) && go.load(Ordering::Relaxed) { launch(&c) }
     Ok(())
 }

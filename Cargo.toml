@@ -1,6 +1,6 @@
 [package]
 name = "cyberpunk-mod-compat-checker"
-version = "1.6.0"
+version = "2.0.0"
 edition = "2024"
 description = "Cyberpunk Mod Compatibility Checker"
 license = "MIT"
@@ -16,6 +16,10 @@ eframe = { version = "0.32.3", features = ["persistence"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
+# Pre-install check: read a mod's .7z or .zip in memory (pure Rust, no C code) and its FOMOD installer
+sevenz-rust2 = { version = "0.25.0", default-features = false, features = ["ppmd", "deflate", "bzip2"] }
+zip = { version = "9.8.2", default-features = false, features = ["deflate-flate2", "deflate64"] }
+quick-xml = "0.42.0"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

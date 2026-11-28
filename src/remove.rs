@@ -28,6 +28,9 @@ pub fn date(days: i64) -> String {
     format!("{:04}-{m:02}-{:02}", yoe + era * 400 + i64::from(m <= 2), doy - (153 * mp + 2) / 5 + 1)
 }
 
+/// Today, as "2026-11-25".
+pub fn date_now() -> String { today() }
+
 fn today() -> String { date(SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| (d.as_secs() / 86_400) as i64)) }
 
 /// A mod name fit for a folder name on every OS.

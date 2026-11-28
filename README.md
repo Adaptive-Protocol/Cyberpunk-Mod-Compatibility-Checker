@@ -1,6 +1,6 @@
 # Cyberpunk-Mod-Compatibility-Checker
 
-Check your Cyberpunk 2077 mods before you launch. It tells you which mods are likely to break on your game version, with a link to each fix, and after a crash it shows what went wrong and which mod was blamed. It runs on Windows and Linux.
+Check your Cyberpunk 2077 mods before you launch. It tells you which mods are likely to break on your game version, with a link to each fix, and after a crash it shows what went wrong and which mod was blamed. You can also check a mod you haven't installed yet, before you install it. It runs on Windows, Linux and macOS (where it only reports).
 
 Published on Nexus Mods by [FauxNoodles](https://next.nexusmods.com/profile/FauxNoodles), who maintains this repository.
 
@@ -21,6 +21,8 @@ To have it check before every launch, see [Checking before every launch](#checki
 - If you ask, it backs up and removes a broken mod until its update arrives, then restores it. It lists every file before changing anything.
 - Each scan also checks those backups. When a newer version of a backed-up mod is installed, it shows **Updated mods detected** and asks whether to delete the obsolete versions.
 - With one line in Steam's launch options, it checks every time you press Play. The game starts at once when nothing is red. Otherwise the app shows what's wrong and waits for you.
+- The **Framework Net** maps what your mods stand on and where they touch each other: the shared cores your mods need, and the places two mods change the same thing (see [The Framework Net](#the-framework-net)).
+- The **Pre-install check** reads a mod you haven't installed yet and checks it against the mods you have (see [Pre-install check](#pre-install-check)).
 
 ## Download
 
@@ -28,6 +30,7 @@ Grab the latest build from the [Releases](../../releases) page. See the [Code si
 
 - **Windows:** `CyberpunkModCompatibilityChecker-windows.exe`
 - **Linux:** `CyberpunkModCompatibilityChecker-linux` (run `chmod +x CyberpunkModCompatibilityChecker-linux` once)
+- **macOS (Apple silicon):** `CyberpunkModCompatibilityChecker-macos.zip` holds `Cyberpunk Mod Compatibility Checker.app` (see [macOS](#macos))
 - **Windows, as an archive:** `CyberpunkModCompatibilityChecker-v<version>-windows.7z` holds the same exe with this README, the license and `THIRD-PARTY-NOTICES.txt`. This is the file uploaded to Nexus Mods.
 
 Each is a single program with nothing to install and nothing unpacked to a temp folder. On Linux it needs a desktop session (X11 or Wayland) with OpenGL.
@@ -86,6 +89,38 @@ From then on it checks your mods first. If nothing is red, the game starts strai
 
 ![A script mod whose main mod is missing, flagged before launch](docs/screenshots/v1.6.0/1-missing-import.png)
 
+## The Framework Net
+
+The **Framework Net** group maps what your mods stand on and where they touch each other. It's read from your mods' own files, not from a list of known pairs, so it covers mods nobody has written a rule for.
+
+- **Cores** are the shared bases other mods need: a framework, or one author's base mod that the rest of their mods build on (a *suite core*). Each row says whether the core changes game code, its version where the app can tell, and which of your mods need it. A script core's version comes from its version markers, an archive core's from a fingerprint of its archive, and a mod installed with Mod Organizer 2 can also give its version from MO2.
+- **Overlaps** are two mods changing the same thing, so only one of them takes effect: the same method replaced twice, the same Cyber Engine Tweaks override, the same tweak field set twice, or the same game file in two archives (there the one earlier by name wins). Each line names the file and line in both mods. An overlap is a note, never a verdict: plenty of them are deliberate.
+- **Replaced and wrapped** lists the methods one mod replaces outright while another wraps them. Both still run, so it's shown as a detail, not a problem. Two mods wrapping the same method chain safely and aren't shown at all.
+
+A row is red only for a certain break, and those stay under **Likely to break**: something a mod needs is missing or too old, a core is installed twice, or the list knows the clash.
+
+The Net's data (the archive cores and their versions) lives in [`net.toml`](net.toml), separate from the compatibility list so that older versions of the app keep working with a newer `compat.toml` (see [docs/adr/0001-net-list-file.md](docs/adr/0001-net-list-file.md)). A newer `net.toml` next to the exe is used instead, the same way.
+
+![The Framework Net: cores, overlaps and replaced-and-wrapped methods](docs/screenshots/v2.0.0/1-framework-net.png)
+
+## Pre-install check
+
+**Pre-install check…** in the menu bar checks a mod you haven't installed yet. Drop its `.7z` or `.zip` on the window, or press **Choose file…** (or **Choose folder…** for an already-extracted mod). You can also drop a mod's archive onto the app itself.
+
+- Nothing is installed, extracted, written or run. The archive is read in memory, and the mod's files stay where they are.
+- The result opens with **Will break: N** or **No certain breaks found**, plus the number of notes. It never calls a mod safe: what two mods do once the game is running can't be seen before launch.
+- Each finding names the file and line inside the mod: a module it needs that nothing provides, a core older than it asks for, a framework you don't have, and the mods it would overlap with.
+- If the mod has a **FOMOD installer**, its options are shown ticked the way the installer would have them, and only the ticked files are checked. Change them and the check runs again.
+- Each mod's last result is kept in the app's own settings. If that mod later turns red, its row says what the check found and when.
+
+![A mod checked before installing, with what would break and the overlaps it would cause](docs/screenshots/v2.0.0/2-pre-install-check.png)
+
+## macOS
+
+The Mac app (Apple silicon) **only reports**. It never moves, deletes or restores anything, and it has no launch mode. The Mac game loads redscript and archives patched into it, but not RED4ext, Cyber Engine Tweaks, ArchiveXL, TweakXL or Codeware, so the app checks script imports, mods that need a framework macOS can't run, and mods installed twice, and it tells you what to change by hand.
+
+It isn't notarized by Apple, so macOS asks before it runs the first time: open **System Settings → Privacy & Security**, scroll to the message about the app, and press **Open Anyway**. (Or right-click the app in Finder and choose **Open**.) The app is ad-hoc signed by the build, which proves it hasn't changed since GitHub Actions built it, not who made it.
+
 ## Backing up and removing a mod
 
 Red mods have a **Remove…** button, and **Remove all…** takes every removable red mod at once. Close the game first. The window lists every folder and file the mod has in your mod folders, including ones with the same name in other mod folders (marked "same name"). For a single file left from an older version, only the files beside it with its name are listed, never the current version of the mod. A file inside another mod's folder can't be removed by the app, so its row says which file to move out by hand. It also lists the mods whose scripts build on it, with their files (marked "builds on …"): without it, redscript can't compile them, and that stops every script mod. If one of them is in Mod Organizer 2, the window says to untick it there. Untick any you want to keep, then choose:
@@ -105,9 +140,9 @@ The app then opens **Updated mods detected**, which lists each obsolete backup w
 
 ## The compatibility list
 
-The list is [`compat.toml`](compat.toml). It holds the game builds it covers, the frameworks with the lowest working version per build, and the mods that lean on them, with any known problems and where each report came from. It's built into every release.
+The list is [`compat.toml`](compat.toml). It holds the game builds it covers, the frameworks with the lowest working version per build, and the mods that lean on them, with any known problems and where each report came from. It's built into every release. [`net.toml`](net.toml) is the second list, for the [Framework Net](#the-framework-net): the shared cores, their versions by fingerprint, and the mods in each one's suite.
 
-Between releases, the maintainer may publish a newer `compat.toml` on the Nexus page. Put it next to the exe. The app uses it if its `updated` date is newer than the built-in list's, and tells you if it couldn't read it.
+Between releases, the maintainer may publish a newer `compat.toml` or `net.toml` on the Nexus page. Put it next to the exe. The app uses it if its `updated` date is newer than the built-in list's, and tells you if it couldn't read it. The header line names the date of each list and where it came from.
 
 The list is maintained with a Claude agent ([`.claude/agents/compat-bridge.md`](.claude/agents/compat-bridge.md)). After a game patch, a framework or mod update, or a bug report a player posted on Nexus, it reads the release notes or the report and proposes an update for the maintainer to review. A single report changes nothing until it's confirmed, and no reporter's name or personal details go into the repo. The agent runs on the maintainer's side and is not part of the app. A build stays a draft until the maintainer has run the game on it.
 
@@ -115,14 +150,15 @@ The list is maintained with a Claude agent ([`.claude/agents/compat-bridge.md`](
 
 ```
 CyberpunkModCompatibilityChecker --report [<game folder>] [<MO2 instance folder>]
+CyberpunkModCompatibilityChecker --precheck <mod .7z, .zip or folder> [<game folder>]
 CyberpunkModCompatibilityChecker --launch <game command>
 ```
 
-`--report` prints the same verdicts as text, without opening a window. It lists what **Remove…** would take, but never changes a file. `--launch` checks first and then runs the game command, as described in [Checking before every launch](#checking-before-every-launch).
+`--report` prints the same verdicts as text, without opening a window. It lists what **Remove…** would take, but never changes a file. `--precheck` prints the [Pre-install check](#pre-install-check)'s result for one mod. `--launch` checks first and then runs the game command, as described in [Checking before every launch](#checking-before-every-launch).
 
 ## Removing it
 
-Delete the exe. To remove its settings too, delete `%APPDATA%\Cyberpunk Mod Compatibility Checker` on Windows or `~/.local/share/cyberpunkmodcompatibilitychecker` on Linux. If you backed up mods, `_mod_backups` in your game folder holds them: restore or delete them first, or delete the folder yourself.
+Delete the exe (on macOS, the app). To remove its settings too, delete `%APPDATA%\Cyberpunk Mod Compatibility Checker` on Windows, `~/.local/share/cyberpunkmodcompatibilitychecker` on Linux, or `~/Library/Application Support/Cyberpunk Mod Compatibility Checker` on macOS. If you backed up mods, `_mod_backups` in your game folder holds them: restore or delete them first, or delete the folder yourself.
 
 ## Verifying downloads
 
@@ -153,7 +189,7 @@ cargo build --release          # binary in target/release/
 cargo test                     # verdict, list, detection and backup tests
 ```
 
-Pushing a `v*` tag that matches the version in `Cargo.toml` builds the app for Windows and Linux on GitHub Actions and attaches it to a GitHub release, together with checksums, `THIRD-PARTY-NOTICES.txt` and the Nexus .7z (see `.github/workflows/build.yml`).
+Pushing a `v*` tag that matches the version in `Cargo.toml` builds the app for Windows, Linux and macOS on GitHub Actions and attaches it to a GitHub release, together with checksums, `THIRD-PARTY-NOTICES.txt` and the Nexus .7z (see `.github/workflows/build.yml`).
 
 ## Advanced Crash Reporter
 
@@ -175,8 +211,12 @@ Where the app's design and code come from:
 - **Crash reports:** [Advanced Crash Reporter](https://www.nexusmods.com/cyberpunk2077/mods/34403) by Akiway writes the crash and freeze reports the app reads when it's installed. The app only reads them (the verdict, the mods involved, memory) and links to the mod; none of its code is used.
 - **Archive file index:** the layout of an `.archive`'s file index and its path hashes (FNV-1a 64) are as the modding community documented them in [WolvenKit](https://github.com/WolvenKit/WolvenKit). No code was copied. Checking for sound index files from an older patch came from tracking down missing sounds on the maintainer's own 2.5 install.
 - **Framework knowledge:** which frameworks matter and how they depend on each other comes from the [RED Modding wiki](https://wiki.redmodding.org/cyberpunk-2077-modding/for-mod-creators-theory/core-mods-explained) and each framework's own release notes. The frameworks belong to their authors; this app only checks for them.
+- **Version markers:** reading a suite core's version from marker modules such as `DigitalVixenCore.Api4_9_12` follows the convention [DigitalVixen](https://next.nexusmods.com/profile/DigitalVixen) uses for their core and the mods that need it. The app only reads the names; nothing of theirs is included.
+- **Which archive wins:** that the archive loaded first wins a shared game file, and the idea of showing it as a win/lose pair rather than a fault, comes from [red4-conflicts](https://github.com/rfuzzo/Cyberpunk-utility) by [rfuzzo](https://github.com/rfuzzo). No code was copied.
+- **macOS:** what the Mac game can and can't load (archives patched in and redscript, no RED4ext, CET, ArchiveXL, TweakXL or Codeware) comes from the [RED Modding wiki's macOS page](https://wiki.redmodding.org/cyberpunk-2077-modding/for-mod-users/modding-on-macos) and from [cp2077-mac-archive-patcher](https://github.com/brunoformagio/cp2077-mac-archive-patcher) by [brunoformagio](https://github.com/brunoformagio), which is where the Mac game's own paths are documented. No code was copied, and this app never patches anything.
+- **Mod archives and installers:** the [Pre-install check](#pre-install-check) reads `.7z` with [sevenz-rust2](https://github.com/hasenbanck/sevenz-rust2) and `.zip` with [zip](https://github.com/zip-rs/zip2), both pure Rust, so no C or C++ code goes into the app, and it parses FOMOD installers with [quick-xml](https://github.com/tafia/quick-xml). The FOMOD format itself is the modding community's, as Mod Organizer 2 and Vortex implement it.
 - **Compatibility list:** curated by the maintainer. The list for 2.5 was seeded from the maintainer's own updated 2.5 install and confirmed by a launch test on it.
-- **Libraries:** [egui/eframe](https://github.com/emilk/egui) draws the window, [rfd](https://github.com/PolyMeilex/rfd) opens the native folder picker, and [serde](https://serde.rs) with [toml](https://github.com/toml-rs/toml) reads the list and writes each backup's record. They and their dependencies all use permissive licenses (MIT, Apache-2.0, BSD, Zlib and similar). Each release includes `THIRD-PARTY-NOTICES.txt` with their full license texts.
+- **Libraries:** [egui/eframe](https://github.com/emilk/egui) draws the window, [rfd](https://github.com/PolyMeilex/rfd) opens the native file and folder picker, [serde](https://serde.rs) with [toml](https://github.com/toml-rs/toml) reads the lists and writes each backup's record, and sevenz-rust2, zip and quick-xml read a mod before it's installed. They and their dependencies all use permissive licenses (MIT, Apache-2.0, BSD, Zlib and similar). Each release includes `THIRD-PARTY-NOTICES.txt` with their full license texts.
 - **AI:** the code, tests, list format, agent and documentation were written by an AI assistant (Claude, made by Anthropic) at the maintainer's direction. On Nexus Mods the app is tagged AI-Generated Content.
 
 The **About** menu in the app shows the same credits.
